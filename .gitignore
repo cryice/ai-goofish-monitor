@@ -38,4 +38,4 @@ data/
 *.db-journal
 *.sqlite
 *.sqlite3
-static/
+static/assets/
