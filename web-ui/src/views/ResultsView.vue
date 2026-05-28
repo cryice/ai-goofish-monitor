@@ -20,8 +20,7 @@ import {
 const { t } = useI18n()
 
 const {
-  files,
-  selectedFile,
+  selectedTaskId,
   results,
   insights,
   filters,
@@ -29,24 +28,33 @@ const {
   error,
   refreshResults,
   exportSelectedResults,
-  deleteSelectedFile,
+  deleteSelectedResults,
   toggleItemBlock,
   blacklistKeywords,
   isSavingBlacklist,
   saveBlacklistRules,
   fileOptions,
-  isFileOptionsReady,
 } = useResults()
 
 const isDeleteDialogOpen = ref(false)
 const isBlacklistDialogOpen = ref(false)
 const blacklistDraft = ref('')
 
+// 转换 selectedTaskId (number | null) 到 string | null
+const selectedFileStr = computed({
+  get() {
+    return selectedTaskId.value !== null ? selectedTaskId.value.toString() : null
+  },
+  set(value: string | null) {
+    selectedTaskId.value = value !== null ? parseInt(value) : null
+  },
+})
+
 const selectedTaskLabel = computed(() => {
-  if (!selectedFile.value || fileOptions.value.length === 0) return null
-  const match = fileOptions.value.find((option) => option.value === selectedFile.value)
+  if (!selectedTaskId.value || fileOptions.value.length === 0) return null
+  const match = fileOptions.value.find((option) => option.value === selectedTaskId.value?.toString())
   if (!match) return null
-  return match.taskName || null
+  return match.label || null
 })
 
 const deleteConfirmText = computed(() => {
@@ -56,7 +64,7 @@ const deleteConfirmText = computed(() => {
 })
 
 function openDeleteDialog() {
-  if (!selectedFile.value) {
+  if (!selectedTaskId.value) {
     toast({
       title: t('results.filters.noResultToDelete'),
       variant: 'destructive',
@@ -67,7 +75,7 @@ function openDeleteDialog() {
 }
 
 function openBlacklistDialog() {
-  if (!selectedFile.value) {
+  if (!selectedTaskId.value) {
     toast({
       title: t('results.filters.noResultSelected'),
       variant: 'destructive',
@@ -79,7 +87,7 @@ function openBlacklistDialog() {
 }
 
 function handleExportResults() {
-  if (!selectedFile.value) {
+  if (!selectedTaskId.value) {
     toast({
       title: t('results.filters.noResultToExport'),
       variant: 'destructive',
@@ -90,9 +98,9 @@ function handleExportResults() {
 }
 
 async function handleDeleteResults() {
-  if (!selectedFile.value) return
+  if (!selectedTaskId.value) return
   try {
-    await deleteSelectedFile(selectedFile.value)
+    await deleteSelectedResults()
     toast({ title: t('results.filters.resultDeleted') })
   } catch (e) {
     toast({
@@ -139,10 +147,10 @@ async function handleSaveBlacklistRules() {
     </div>
 
     <ResultsFilterBar
-      :files="files"
+      :files="[]"
       :file-options="fileOptions"
-      :is-ready="isFileOptionsReady"
-      v-model:selectedFile="selectedFile"
+      :is-ready="true"
+      v-model:selectedFile="selectedFileStr"
       v-model:aiRecommendedOnly="filters.ai_recommended_only"
       v-model:keywordRecommendedOnly="filters.keyword_recommended_only"
       v-model:includeHidden="filters.include_hidden"

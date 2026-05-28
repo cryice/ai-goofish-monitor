@@ -1,6 +1,4 @@
 import { ref, reactive, watch, onMounted, computed } from 'vue'
-import { useRoute } from 'vue-router'
-import { useI18n } from 'vue-i18n'
 import type { ResultInsights, ResultItem } from '@/types/result.d.ts'
 import * as resultsApi from '@/api/results'
 import type { GetResultContentParams } from '@/api/results'
@@ -8,26 +6,64 @@ import { useWebSocket } from '@/composables/useWebSocket'
 import * as tasksApi from '@/api/tasks'
 
 export function useResults() {
-  const { t } = useI18n()
-  const route = useRoute()
-  // State
-  const files = ref<string[]>([])
-  const selectedFile = ref<string | null>(null)
+  // const { t } = useI18n()  // 暂时未使用
+  // const route = useRoute()  // 暂时未使用
+
+  // 记住每个任务的实际文件名（避免重复尝试）
+  const taskFileMapping = ref<Record<number, string>>({})
+
+  /**
+   * 获取任务对应的实际文件名
+   */
+  async function getActualFilename(taskId: number, keyword: string): Promise<string | null> {
+    // 如果已经缓存过，直接返回
+    if (taskFileMapping.value[taskId]) {
+      return taskFileMapping.value[taskId]
+    }
+
+    const possibleFilenames = [
+      `${keyword}_full_data.jsonl`,
+      `${keyword.replace(/\s+/g, '_')}_full_data.jsonl`,
+      `${keyword.replace(/\s+/g, '_').toLowerCase()}_full_data.jsonl`,
+    ]
+
+    for (const filename of possibleFilenames) {
+      try {
+        // 尝试获取该文件的第一条记录来验证文件是否存在
+        await resultsApi.getResultContent(filename, {
+          page: 1,
+          limit: 1,
+          recommended_only: false,
+          ai_recommended_only: false,
+          keyword_recommended_only: false,
+          include_hidden: false,
+          sort_by: 'crawl_time',
+          sort_order: 'desc',
+        })
+        // 成功！缓存这个文件名
+        taskFileMapping.value[taskId] = filename
+        return filename
+      } catch (e) {
+        // 继续尝试下一个
+      }
+    }
+
+    return null
+  }
+  const allTasks = ref<Array<{id: number; task_name: string; keyword: string}>>([])
+  const selectedTaskId = ref<number | null>(null)
   const results = ref<ResultItem[]>([])
   const insights = ref<ResultInsights | null>(null)
   const totalItems = ref(0)
   const page = ref(1)
   const limit = ref(100)
   const blacklistKeywords = ref<string[]>([])
-  const taskNameByKeyword = ref<Record<string, string>>({})
-  const isFileOptionsReady = ref(false)
-  const hasFetchedFiles = ref(false)
-  const hasFetchedTasks = ref(false)
+  const isLoading = ref(false)
+  const error = ref<Error | null>(null)
   const isSavingBlacklist = ref(false)
-  const readyDelayMs = 200
-  let readyTimer: ReturnType<typeof setTimeout> | null = null
-  
+
   const STORAGE_KEY_FILTERS = 'resultFilters'
+  const STORAGE_KEY_SELECTED_TASK = 'lastSelectedTaskId'
 
   function loadPersistedFilters(): Required<Omit<GetResultContentParams, 'page' | 'limit'>> {
     const defaults: Required<Omit<GetResultContentParams, 'page' | 'limit'>> = {
@@ -46,47 +82,40 @@ export function useResults() {
   }
 
   const filters = reactive<Required<Omit<GetResultContentParams, 'page' | 'limit'>>>(loadPersistedFilters())
-
-  const isLoading = ref(false)
-  const error = ref<Error | null>(null)
   const { on } = useWebSocket()
 
-  function normalizeKeyword(value: string) {
-    return value.trim().toLowerCase().replace(/\s+/g, '_')
-  }
-
-  function getKeywordFromFilename(filename: string) {
-    return filename.replace(/_full_data\.jsonl$/i, '').toLowerCase()
-  }
-
-  // Methods
-  async function fetchFiles() {
+  /**
+   * 获取所有任务
+   */
+  async function fetchTasks() {
     try {
-      const fileList = await resultsApi.getResultFiles()
-      files.value = fileList
-      // If a file is selected that no longer exists, reset it.
-      // Otherwise, if nothing is selected, select the first file by default.
-      if (selectedFile.value && fileList.includes(selectedFile.value)) {
-        return
+      const tasks = await tasksApi.getAllTasks()
+      allTasks.value = tasks
+
+      // 恢复上次选中的任务
+      const lastSelectedId = localStorage.getItem(STORAGE_KEY_SELECTED_TASK)
+      if (lastSelectedId) {
+        const taskId = parseInt(lastSelectedId)
+        if (tasks.find(t => t.id === taskId)) {
+          selectedTaskId.value = taskId
+          return
+        }
       }
 
-      const lastSelected = localStorage.getItem('lastSelectedResultFile')
-      if (lastSelected && fileList.includes(lastSelected)) {
-        selectedFile.value = lastSelected
-        return
+      // 如果没有保存的选择，选择第一个任务
+      if (tasks.length > 0) {
+        selectedTaskId.value = tasks[0]!.id
       }
-
-      selectedFile.value = fileList[0] || null
     } catch (e) {
       if (e instanceof Error) error.value = e
-    } finally {
-      hasFetchedFiles.value = true
-      scheduleFileOptionsReady()
     }
   }
 
+  /**
+   * 根据选中的任务获取结果
+   */
   async function fetchResults() {
-    if (!selectedFile.value) {
+    if (selectedTaskId.value === null) {
       results.value = []
       totalItems.value = 0
       return
@@ -94,12 +123,29 @@ export function useResults() {
 
     isLoading.value = true
     error.value = null
+
     try {
-      const data = await resultsApi.getResultContent(selectedFile.value, {
+      const selectedTask = allTasks.value.find(t => t.id === selectedTaskId.value)
+      if (!selectedTask) {
+        results.value = []
+        totalItems.value = 0
+        return
+      }
+
+      // 获取任务对应的实际文件名
+      const filename = await getActualFilename(selectedTask.id, selectedTask.keyword)
+      if (!filename) {
+        results.value = []
+        totalItems.value = 0
+        return
+      }
+
+      const data = await resultsApi.getResultContent(filename, {
         ...filters,
         page: page.value,
         limit: limit.value,
       })
+
       results.value = data.items
       totalItems.value = data.total_items
     } catch (e) {
@@ -111,28 +157,57 @@ export function useResults() {
     }
   }
 
+  /**
+   * 获取结果洞察
+   */
   async function fetchInsights() {
-    if (!selectedFile.value) {
+    if (selectedTaskId.value === null) {
       insights.value = null
       return
     }
 
     try {
-      insights.value = await resultsApi.getResultInsights(selectedFile.value)
+      const selectedTask = allTasks.value.find(t => t.id === selectedTaskId.value)
+      if (!selectedTask) {
+        return
+      }
+
+      // 获取任务对应的实际文件名
+      const filename = await getActualFilename(selectedTask.id, selectedTask.keyword)
+      if (!filename) {
+        insights.value = null
+        return
+      }
+
+      const data = await resultsApi.getResultInsights(filename)
+      insights.value = data
     } catch (e) {
       if (e instanceof Error) error.value = e
       insights.value = null
     }
   }
 
+  /**
+   * 获取黑名单规则
+   */
   async function fetchBlacklistRules() {
-    if (!selectedFile.value) {
+    if (selectedTaskId.value === null) {
       blacklistKeywords.value = []
       return
     }
 
     try {
-      const data = await resultsApi.getResultBlacklistRules(selectedFile.value)
+      const selectedTask = allTasks.value.find(t => t.id === selectedTaskId.value)
+      if (!selectedTask) return
+
+      // 使用缓存的文件名
+      const filename = await getActualFilename(selectedTask.id, selectedTask.keyword)
+      if (!filename) {
+        blacklistKeywords.value = []
+        return
+      }
+
+      const data = await resultsApi.getResultBlacklistRules(filename)
       blacklistKeywords.value = data.keywords || []
     } catch (e) {
       if (e instanceof Error) error.value = e
@@ -140,81 +215,46 @@ export function useResults() {
     }
   }
 
-  async function fetchTaskNameMap() {
+  /**
+   * 导出结果
+   */
+  async function exportSelectedResults() {
+    if (selectedTaskId.value === null) return
+
+    const selectedTask = allTasks.value.find(t => t.id === selectedTaskId.value)
+    if (!selectedTask) return
+
     try {
-      const tasks = await tasksApi.getAllTasks()
-      const mapping: Record<string, string> = {}
-      tasks.forEach((task) => {
-        if (task.keyword) {
-          mapping[normalizeKeyword(task.keyword)] = task.task_name
-        }
-      })
-      taskNameByKeyword.value = mapping
+      // 使用缓存的文件名
+      const filename = await getActualFilename(selectedTask.id, selectedTask.keyword)
+      if (filename) {
+        resultsApi.downloadResultExport(filename, { ...filters })
+      }
     } catch (e) {
       if (e instanceof Error) error.value = e
-    } finally {
-      hasFetchedTasks.value = true
-      scheduleFileOptionsReady()
     }
   }
 
-  function scheduleFileOptionsReady() {
-    if (isFileOptionsReady.value || !hasFetchedFiles.value || !hasFetchedTasks.value) return
-    if (readyTimer) return
-    readyTimer = setTimeout(() => {
-      isFileOptionsReady.value = true
-      readyTimer = null
-    }, readyDelayMs)
-  }
+  /**
+   * 删除选中的任务的结果
+   */
+  async function deleteSelectedResults() {
+    if (selectedTaskId.value === null) return
 
-  // Real-time updates
-  on('results_updated', async () => {
-    const oldFile = selectedFile.value
-    await fetchFiles()
-    await fetchFileTaskNames()  // 文件更新后重新获取任务名称
-    // If the selected file remains the same, refresh its content (in case of append)
-    // If it changed (e.g. from null to new file), the watcher will handle it.
-    if (selectedFile.value && selectedFile.value === oldFile) {
-      fetchResults()
-      fetchInsights()
-    }
-  })
+    const selectedTask = allTasks.value.find(t => t.id === selectedTaskId.value)
+    if (!selectedTask) return
 
-  on('tasks_updated', () => {
-    fetchTaskNameMap()
-    fetchFileTaskNames()  // 任务更新后重新获取文件的任务名称
-  })
-
-  async function refreshResults() {
-    const current = selectedFile.value
-    await fetchFiles()
-    await fetchFileTaskNames()  // 刷新时重新获取任务名称
-    if (selectedFile.value && selectedFile.value === current) {
-      await fetchResults()
-      await fetchInsights()
-      await fetchBlacklistRules()
-    }
-  }
-
-  function exportSelectedResults() {
-    if (!selectedFile.value) return
-    resultsApi.downloadResultExport(selectedFile.value, { ...filters })
-  }
-
-  async function deleteSelectedFile(filename?: string) {
-    const target = filename || selectedFile.value
-    if (!target) return
     isLoading.value = true
     error.value = null
+
     try {
-      await resultsApi.deleteResultFile(target)
-      if (selectedFile.value === target) {
-        const lastSelected = localStorage.getItem('lastSelectedResultFile')
-        if (lastSelected === target) {
-          localStorage.removeItem('lastSelectedResultFile')
-        }
+      // 使用缓存的文件名
+      const filename = await getActualFilename(selectedTask.id, selectedTask.keyword)
+      if (filename) {
+        await resultsApi.deleteResultFile(filename)
       }
-      await fetchFiles()
+
+      await fetchResults()
     } catch (e) {
       if (e instanceof Error) error.value = e
       throw e
@@ -223,28 +263,27 @@ export function useResults() {
     }
   }
 
-  async function toggleItemBlock(item: ResultItem) {
-    if (!selectedFile.value) return
-    const itemId = item.商品信息?.商品ID
-    if (!itemId) return
-    const newStatus = item._status === 'hidden' ? 'active' : 'hidden'
-    try {
-      await resultsApi.updateItemStatus(selectedFile.value, itemId, newStatus)
-      await fetchResults()
-    } catch (e) {
-      if (e instanceof Error) error.value = e
-    }
-  }
-
+  /**
+   * 保存黑名单规则
+   */
   async function saveBlacklistRules(keywords: string[]) {
-    if (!selectedFile.value) return
+    if (selectedTaskId.value === null) return
+
+    const selectedTask = allTasks.value.find(t => t.id === selectedTaskId.value)
+    if (!selectedTask) return
+
     isSavingBlacklist.value = true
     error.value = null
+
     try {
-      const data = await resultsApi.updateResultBlacklistRules(selectedFile.value, keywords)
-      blacklistKeywords.value = data.keywords || []
-      await fetchResults()
-      await fetchInsights()
+      // 使用缓存的文件名
+      const filename = await getActualFilename(selectedTask.id, selectedTask.keyword)
+      if (filename) {
+        const data = await resultsApi.updateResultBlacklistRules(filename, keywords)
+        blacklistKeywords.value = data.keywords || []
+        await fetchResults()
+        await fetchInsights()
+      }
     } catch (e) {
       if (e instanceof Error) error.value = e
       throw e
@@ -253,115 +292,108 @@ export function useResults() {
     }
   }
 
-  // Watchers
-  watch(filters, (val) => {
-    localStorage.setItem(STORAGE_KEY_FILTERS, JSON.stringify(val))
-  }, { deep: true })
-  watch([selectedFile, filters], fetchResults, { deep: true })
-  watch(selectedFile, () => {
-    fetchInsights()
-    fetchBlacklistRules()
-  })
-  watch(selectedFile, (value) => {
-    if (value) localStorage.setItem('lastSelectedResultFile', value)
-  })
-  watch(
-    [() => route.query.file, files],
-    ([routeFile, currentFiles]) => {
-      if (typeof routeFile !== 'string') return
-      if (currentFiles.includes(routeFile)) {
-        selectedFile.value = routeFile
-      }
-    },
-    { immediate: true }
-  )
+  /**
+   * 切换项目隐藏状态
+   */
+  async function toggleItemBlock(item: ResultItem) {
+    if (selectedTaskId.value === null) return
 
-  const fileTaskNames = ref<Record<string, string>>({})
+    const selectedTask = allTasks.value.find(t => t.id === selectedTaskId.value)
+    if (!selectedTask) return
 
-  async function fetchFileTaskNames() {
-    /**
-     * 从结果项中获取每个文件对应的实际任务名称
-     * 这样可以准确显示任务名，即使有多个任务使用同样的关键词
-     */
+    const itemId = item.商品信息?.商品ID
+    if (!itemId) return
+
+    const newStatus = item._status === 'hidden' ? 'active' : 'hidden'
+
     try {
-      const mapping: Record<string, string> = {}
-      for (const file of files.value) {
-        try {
-          // 获取该文件的第一条结果项
-          const data = await resultsApi.getResultContent(file, {
-            page: 1,
-            limit: 1,
-            recommended_only: false,
-            ai_recommended_only: false,
-            keyword_recommended_only: false,
-            include_hidden: false,
-            sort_by: 'crawl_time',
-            sort_order: 'desc',
-          })
-          if (data?.items && data.items.length > 0) {
-            // 从结果项的 "任务名称" 字段获取任务名称
-            const taskName = (data.items[0] as any)["任务名称"]
-            if (taskName) {
-              mapping[file] = taskName
-            }
-          }
-        } catch (e) {
-          // 如果获取单个文件失败，跳过
-          console.warn(`获取文件 ${file} 的任务名称失败:`, e)
-        }
+      // 使用缓存的文件名
+      const filename = await getActualFilename(selectedTask.id, selectedTask.keyword)
+      if (filename) {
+        await resultsApi.updateItemStatus(filename, itemId, newStatus)
+        await fetchResults()
       }
-      fileTaskNames.value = mapping
     } catch (e) {
       if (e instanceof Error) error.value = e
     }
   }
 
-  const fileOptions = computed(() =>
-    files.value.map((file) => {
-      // 优先级：
-      // 1. 从结果项中的 task_name 字段读取（最准确）
-      // 2. 从 keyword 名称映射读取
-      // 3. 显示"未命名"
-      let taskName = fileTaskNames.value[file]
-      if (!taskName) {
-        const keyword = getKeywordFromFilename(file)
-        taskName = taskNameByKeyword.value[keyword]
-      }
-      return {
-        value: file,
-        taskName: taskName || t('common.unnamed'),
-        label: t('results.filters.taskNameLabel', {
-          task: taskName || t('common.unnamed'),
-        }),
-      }
-    })
-  )
+  /**
+   * 刷新结果
+   */
+  async function refreshResults() {
+    await fetchResults()
+    await fetchInsights()
+    await fetchBlacklistRules()
+  }
+
+  // Watchers
+  watch(filters, (val) => {
+    localStorage.setItem(STORAGE_KEY_FILTERS, JSON.stringify(val))
+  }, { deep: true })
+
+  watch([selectedTaskId, filters], () => {
+    page.value = 1
+    fetchResults()
+  }, { deep: true })
+
+  watch(selectedTaskId, (value) => {
+    if (value !== null) {
+      localStorage.setItem(STORAGE_KEY_SELECTED_TASK, value.toString())
+    }
+    fetchInsights()
+    fetchBlacklistRules()
+  })
+
+  // Real-time updates
+  on('results_updated', async () => {
+    await refreshResults()
+  })
+
+  on('tasks_updated', async () => {
+    await fetchTasks()
+    await refreshResults()
+  })
+
+  /**
+   * 下拉框选项 - 直接显示任务列表
+   */
+  const fileOptions = computed(() => {
+    return allTasks.value.map(task => ({
+      value: task.id.toString(),
+      label: task.task_name,
+    }))
+  })
 
   // Lifecycle
   onMounted(() => {
-    fetchFiles()
-    fetchTaskNameMap()
-    fetchFileTaskNames()
+    fetchTasks()
   })
 
   return {
-    files,
-    selectedFile,
+    // Data
+    allTasks,
+    selectedTaskId,
     results,
     insights,
     totalItems,
+    page,
+    limit,
     filters,
     isLoading,
     error,
-    fetchFiles, // Expose to allow manual refresh
-    refreshResults,
-    exportSelectedResults,
-    deleteSelectedFile,
-    toggleItemBlock,
     blacklistKeywords,
     isSavingBlacklist,
-    saveBlacklistRules,
+
+    // UI
     fileOptions,
-    isFileOptionsReady,
+    isFileOptionsReady: computed(() => true), // 简化：任务列表总是准备好的
+
+    // Methods
+    refreshResults,
+    exportSelectedResults,
+    deleteSelectedResults,
+    toggleItemBlock,
+    saveBlacklistRules,
   }
 }
