@@ -22,9 +22,9 @@ export function useResults() {
     }
 
     const possibleFilenames = [
-      `${keyword}_full_data.jsonl`,
       `${keyword.replace(/\s+/g, '_')}_full_data.jsonl`,
       `${keyword.replace(/\s+/g, '_').toLowerCase()}_full_data.jsonl`,
+      `${keyword}_full_data.jsonl`,
     ]
 
     for (const filename of possibleFilenames) {
