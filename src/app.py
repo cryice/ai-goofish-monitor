@@ -264,6 +264,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if request.url.path in public_paths:
             return await call_next(request)
 
+        # 内部 API 不需要认证（子进程间通信）
+        if request.url.path.startswith("/api/internal/"):
+            return await call_next(request)
+
         # 检查 /api/ 路由是否有有效的 token
         if request.url.path.startswith("/api/"):
             from src.api.dependencies import get_session_token
