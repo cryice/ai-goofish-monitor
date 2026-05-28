@@ -48,3 +48,15 @@ export async function stopTask(taskId: number): Promise<void> {
 export async function deleteTask(taskId: number): Promise<void> {
   await http(`/api/tasks/${taskId}`, { method: 'DELETE' })
 }
+
+export async function getTaskProgress(taskId: number): Promise<any> {
+  return await http(`/api/tasks/progress/${taskId}`)
+}
+
+export async function getTaskProgressHistory(taskId: number): Promise<any[]> {
+  return await http(`/api/tasks/progress-history/${taskId}`)
+}
+
+export async function getTaskRuns(taskId: number): Promise<any[]> {
+  return await http(`/api/tasks/runs/${taskId}`)
+}

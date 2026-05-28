@@ -116,6 +116,9 @@ export function useSettings() {
     isSaving.value = true
     try {
       await settingsApi.updateRotationSettings(rotationSettings.value)
+      // 保存成功后刷新轮换设置数据，确保获取最新值
+      const updated = await settingsApi.getRotationSettings()
+      rotationSettings.value = updated
     } catch (e) {
       if (e instanceof Error) error.value = e
       throw e

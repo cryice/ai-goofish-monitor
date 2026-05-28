@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useTasks } from '@/composables/useTasks'
 import type { Task, TaskUpdate } from '@/types/task.d.ts'
@@ -34,6 +34,7 @@ const {
   stoppingTaskIds,
 } = useTasks()
 const route = useRoute()
+const router = useRouter()
 
 // State for dialogs
 const isEditDialogOpen = ref(false)
@@ -187,6 +188,10 @@ async function handleToggleEnabled(task: Task, enabled: boolean) {
   }
 }
 
+function handleViewProgress(taskId: number) {
+  router.push({ name: 'TaskProgress', query: { taskId: String(taskId) } })
+}
+
 async function fetchAccountOptions() {
   try {
     accountOptions.value = await listAccounts()
@@ -276,6 +281,7 @@ onMounted(fetchAccountOptions)
       @stop-task="handleStopTask"
       @refresh-criteria="handleOpenCriteriaDialog"
       @toggle-enabled="handleToggleEnabled"
+      @view-progress="handleViewProgress"
     />
 
     <Dialog v-model:open="isDeleteDialogOpen">

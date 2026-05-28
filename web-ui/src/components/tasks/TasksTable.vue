@@ -25,7 +25,8 @@ import {
   Layers,
   MapPin,
   RefreshCcw,
-  Search
+  Search,
+  Activity,
 } from 'lucide-vue-next'
 import { formatCountdown, formatNextRunAbsolute } from '@/lib/taskSchedule'
 
@@ -91,6 +92,7 @@ const emit = defineEmits<{
   (e: 'edit-task', task: Task): void
   (e: 'refresh-criteria', task: Task): void
   (e: 'toggle-enabled', task: Task, enabled: boolean): void
+  (e: 'view-progress', taskId: number): void
 }>()
 </script>
 
@@ -237,6 +239,16 @@ const emit = defineEmits<{
           </div>
 
           <div class="mt-4 flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              class="flex-1 min-w-[120px]"
+              :aria-label="`${t('tasks.table.viewProgress')} ${task.task_name}`"
+              @click="$emit('view-progress', task.id)"
+            >
+              <Layers class="mr-1 h-3.5 w-3.5" />
+              {{ t('tasks.table.viewProgress') }}
+            </Button>
             <Button
               v-if="!task.is_running"
               size="sm"
@@ -490,6 +502,16 @@ const emit = defineEmits<{
                 </Button>
 
                 <div class="flex items-center gap-0.5 ml-1">
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    class="w-8 h-8 rounded-full text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 transition-colors"
+                    :aria-label="`${t('tasks.table.viewProgress')} ${task.task_name}`"
+                    :title="`${t('tasks.table.viewProgress')} ${task.task_name}`"
+                    @click="emit('view-progress', task.id)"
+                  >
+                    <Activity class="w-3.5 h-3.5" />
+                  </Button>
                   <Button 
                     size="icon" 
                     variant="ghost" 

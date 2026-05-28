@@ -99,6 +99,12 @@ watch(() => [props.mode, props.initialData, props.defaultValues, props.defaultAc
     form.value = {
       ...props.initialData,
       ...defaultValues,
+      execution_mode: defaultValues.execution_mode || props.initialData.execution_mode || 'periodic',
+      start_page: defaultValues.start_page ?? props.initialData.start_page ?? 1,
+      current_page: defaultValues.current_page ?? props.initialData.current_page ?? 0,
+      max_page_limit: defaultValues.max_page_limit ?? props.initialData.max_page_limit ?? 50,
+      sleep_interval_min: defaultValues.sleep_interval_min ?? props.initialData.sleep_interval_min ?? 180,
+      sleep_interval_max: defaultValues.sleep_interval_max ?? props.initialData.sleep_interval_max ?? 300,
       account_strategy:
         defaultValues.account_strategy ||
         props.initialData.account_strategy ||
@@ -125,6 +131,12 @@ watch(() => [props.mode, props.initialData, props.defaultValues, props.defaultAc
       description: '',
       analyze_images: true,
       max_pages: 3,
+      max_page_limit: 50,
+      start_page: 1,
+      current_page: 0,
+      execution_mode: 'periodic',
+      sleep_interval_min: 180,
+      sleep_interval_max: 300,
       personal_only: true,
       min_price: undefined,
       max_price: undefined,
@@ -330,6 +342,41 @@ function handleSubmit() {
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label for="max-pages" class="sm:text-right">{{ t('tasks.form.maxPages') }}</Label>
         <Input id="max-pages" v-model.number="form.max_pages" type="number" class="sm:col-span-3" />
+      </div>
+      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+        <Label class="sm:text-right">{{ t('tasks.form.executionMode') }}</Label>
+        <div class="sm:col-span-3">
+          <Select v-model="form.execution_mode as any">
+            <SelectTrigger>
+              <SelectValue :placeholder="t('tasks.form.executionModePlaceholder')" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="periodic">{{ t('tasks.form.periodicMode') }}</SelectItem>
+              <SelectItem value="continuous">{{ t('tasks.form.continuousMode') }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <div v-if="form.execution_mode === 'continuous'" class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+        <Label for="max-page-limit" class="sm:text-right">{{ t('tasks.form.maxPageLimit') }}</Label>
+        <Input id="max-page-limit" v-model.number="form.max_page_limit as any" type="number" class="sm:col-span-3" />
+      </div>
+      <div v-if="form.execution_mode === 'continuous'" class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+        <Label class="sm:text-right">{{ t('tasks.form.sleepInterval') }}</Label>
+        <div class="grid grid-cols-[1fr_auto_1fr_auto_1fr] items-center gap-2 sm:col-span-3">
+          <Input type="number" v-model.number="form.sleep_interval_min as any" :aria-label="t('tasks.form.sleepIntervalMin')" :placeholder="t('tasks.form.sleepIntervalMin')" />
+          <span>-</span>
+          <Input type="number" v-model.number="form.sleep_interval_max as any" :aria-label="t('tasks.form.sleepIntervalMax')" :placeholder="t('tasks.form.sleepIntervalMax')" />
+          <span class="text-xs text-gray-500">{{ t('tasks.form.sleepIntervalUnit') }}</span>
+        </div>
+      </div>
+      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+        <Label for="start-page" class="sm:text-right">{{ t('tasks.form.startPage') }}</Label>
+        <Input id="start-page" v-model.number="form.start_page as any" type="number" class="sm:col-span-3" />
+      </div>
+      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+        <Label for="current-page" class="sm:text-right">{{ t('tasks.form.currentPage') }}</Label>
+        <Input id="current-page" v-model.number="form.current_page as any" type="number" class="sm:col-span-3" />
       </div>
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label for="cron" class="sm:text-right">{{ t('tasks.form.schedule') }}</Label>

@@ -4,7 +4,6 @@
 
 基于 Playwright 和 AI 的闲鱼多任务实时监控，提供完整的 Web 管理界面。
 
-
 ## 核心特性
 
 - **Web 可视化管理**: 任务管理、账号管理、AI 标准编辑、运行日志、结果浏览
@@ -35,6 +34,7 @@ docker compose down
 ```
 
 如果镜像无法访问或下载速度慢，可尝试使用加速：
+
 ```bash
 
 docker pull ghcr.nju.edu.cn/usagi-org/ai-goofish:latest
@@ -50,33 +50,40 @@ docker compose up -d
 - 如果你修改了 `.env` 中的 `SERVER_PORT`，请同步更新 `docker-compose.yaml` 里的端口映射。
 - `docker-compose.yaml` 默认会把 SQLite 主库挂载到 `./data:/app/data`，数据库文件默认为 `data/app.sqlite3`
 - 目前默认持久化这些目录：
-    - `data/`  SQLite 主存储（任务、结果、价格历史）
-    - `state/`  登录状态 cookie 文件
-    - `prompts/`  任务提示词
-    - `logs/`  运行日志
-    - `images/`  商品图片与任务临时图片目录
-    - `config.json`、`jsonl/`、`price_history/`  首次升级到 SQLite 时用于兼容导入的旧数据源
+  - `data/` SQLite 主存储（任务、结果、价格历史）
+  - `state/` 登录状态 cookie 文件
+  - `prompts/` 任务提示词
+  - `logs/` 运行日志
+  - `images/` 商品图片与任务临时图片目录
+  - `config.json`、`jsonl/`、`price_history/` 首次升级到 SQLite 时用于兼容导入的旧数据源
 
 ### 数据存储与迁移
 
-- 当前在线主存储为 SQLite，默认路径 `data/app.sqlite3`
-- 可通过环境变量 `APP_DATABASE_FILE` 自定义数据库路径；Docker 默认设置为 `/app/data/app.sqlite3`
+- 当前支持 SQLite 和 PostgreSQL 18，默认使用 SQLite，路径为 `data/app.sqlite3`
+- 数据库类型可通过环境变量 `DB_TYPE` 配置（`sqlite` 或 `postgres`）
+- SQLite 数据库路径可通过环境变量 `SQLITE_PATH` 自定义
+- PostgreSQL 配置可通过以下环境变量自定义：
+  - `POSTGRES_HOST`: 数据库主机地址（默认 localhost）
+  - `POSTGRES_PORT`: 数据库端口（默认 5432）
+  - `POSTGRES_DB`: 数据库名称（默认 goofish_monitor）
+  - `POSTGRES_USER`: 用户名（默认 goofish_user）
+  - `POSTGRES_PASSWORD`: 密码
+  - `POSTGRES_SSL_MODE`: SSL 模式（默认 prefer）
 - 应用启动时会自动建库建表，并尝试从旧的 `config.json`、`jsonl/`、`price_history/` 导入一次历史数据
-- `state/`、`prompts/`、`logs/`、`images/` 仍然是文件系统目录，不在 SQLite 中
+- `state/`、`prompts/`、`logs/`、`images/` 仍然是文件系统目录，不在数据库中
 - 商品图片会临时落到 `images/task_images_<task_name>/`，任务结束后默认会清理
-- 首次升级完成并确认 `data/app.sqlite3` 中数据正确后，可视部署方式决定是否继续保留旧的 `config.json`、`jsonl/`、`price_history/` 挂载
+- 首次升级完成并确认数据库中数据正确后，可视部署方式决定是否继续保留旧的 `config.json`、`jsonl/`、`price_history/` 挂载
 
 ### 最少配置
 
-| 变量 | 说明 | 必填 |
-|------|------|------|
-| `OPENAI_API_KEY` | AI 模型 API Key | 是 |
-| `OPENAI_BASE_URL` | OpenAI 兼容接口地址 | 是 |
-| `OPENAI_MODEL_NAME` | 支持图片输入的模型名称 | 是 |
-| `WEB_USERNAME` / `WEB_PASSWORD` | Web UI 登录账号密码，默认 `admin/admin123` | 否 |
+| 变量                            | 说明                                       | 必填 |
+| ------------------------------- | ------------------------------------------ | ---- |
+| `OPENAI_API_KEY`                | AI 模型 API Key                            | 是   |
+| `OPENAI_BASE_URL`               | OpenAI 兼容接口地址                        | 是   |
+| `OPENAI_MODEL_NAME`             | 支持图片输入的模型名称                     | 是   |
+| `WEB_USERNAME` / `WEB_PASSWORD` | Web UI 登录账号密码，默认 `admin/admin123` | 否   |
 
 其余配置见下方“配置说明”。
-
 
 ### 第一次使用
 
@@ -90,8 +97,6 @@ docker compose up -d
 - `AI判断`：填写“详细需求”，提交后会弹出独立进度弹窗，后台异步生成分析标准。
 - `关键词判断`：填写关键词规则，任务会直接创建，不经过 AI 生成流程。
 - `区域筛选`：已改为省 / 市 / 区三级选择器，数据基于闲鱼页面抓取快照内置。
-
-
 
 ## 用户使用说明
 
@@ -119,8 +124,6 @@ docker compose up -d
 - 可查看系统状态、编辑 Prompt、调整代理与轮换相关配置。
 
 </details>
-
-
 
 ## 开发者开发
 
@@ -192,6 +195,17 @@ cd web-ui && npm run build
 
 <details>
 <summary>点击展开常用配置项</summary>
+
+### 数据库配置
+
+- `DB_TYPE`：数据库类型，可选 `sqlite` 或 `postgres`（默认 `sqlite`）
+- `SQLITE_PATH`：SQLite 数据库文件路径（当 DB_TYPE=sqlite 时生效）
+- `POSTGRES_HOST`：PostgreSQL 主机地址（默认 localhost）
+- `POSTGRES_PORT`：PostgreSQL 端口（默认 5432）
+- `POSTGRES_DB`：PostgreSQL 数据库名称（默认 goofish_monitor）
+- `POSTGRES_USER`：PostgreSQL 用户名（默认 goofish_user）
+- `POSTGRES_PASSWORD`：PostgreSQL 密码
+- `POSTGRES_SSL_MODE`：PostgreSQL SSL 模式（默认 prefer）
 
 ### AI 与运行时
 
@@ -284,8 +298,6 @@ AI 模式会先生成分析标准，再创建任务。现在该流程已改为�
 
 </details>
 
-
-
 ## 致谢
 
 <details>
@@ -304,7 +316,6 @@ AI 模式会先生成分析标准，再创建任务。现在该流程已改为�
 以及感谢 ClaudeCode/Gemini/Codex 等模型工具，解放双手 体验Vibe Coding的快乐。
 
 </details>
-
 
 ## 注意事项
 

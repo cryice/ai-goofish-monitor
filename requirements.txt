@@ -16,3 +16,5 @@ qrcode
 pytest
 pytest-asyncio
 coverage
+psycopg2-binary
+sqlalchemy

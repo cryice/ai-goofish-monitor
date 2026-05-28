@@ -14,7 +14,8 @@ from src.infrastructure.persistence.storage_names import DEFAULT_DATABASE_PATH
 
 BUSY_TIMEOUT_MS = 5000
 
-SCHEMA_STATEMENTS = (
+# 表定义：只包含 CREATE TABLE 和 UNIQUE 约束
+TABLE_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS app_metadata (
         key TEXT PRIMARY KEY,
@@ -30,6 +31,7 @@ SCHEMA_STATEMENTS = (
         description TEXT,
         analyze_images INTEGER NOT NULL,
         max_pages INTEGER NOT NULL,
+        start_page INTEGER NOT NULL DEFAULT 1,
         personal_only INTEGER NOT NULL,
         min_price TEXT,
         max_price TEXT,
@@ -43,7 +45,35 @@ SCHEMA_STATEMENTS = (
         region TEXT,
         decision_mode TEXT NOT NULL,
         keyword_rules_json TEXT NOT NULL,
-        is_running INTEGER NOT NULL
+        is_running INTEGER NOT NULL,
+        execution_mode TEXT NOT NULL DEFAULT 'periodic',
+        max_pages INTEGER NOT NULL DEFAULT 3,
+        sleep_interval_min INTEGER NOT NULL DEFAULT 180,
+        sleep_interval_max INTEGER NOT NULL DEFAULT 300,
+        max_page_limit INTEGER,
+        current_page INTEGER DEFAULT 0,
+        total_items_found INTEGER DEFAULT 0,
+        items_processed INTEGER DEFAULT 0,
+        last_crawl_time TEXT,
+        estimated_remaining_items INTEGER,
+        progress_percentage REAL DEFAULT 0.0,
+        last_error TEXT,
+        error_timestamp TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS task_progress (
+        id INTEGER PRIMARY KEY,
+        task_id INTEGER NOT NULL UNIQUE,
+        current_page INTEGER DEFAULT 0,
+        total_items_found INTEGER DEFAULT 0,
+        items_processed INTEGER DEFAULT 0,
+        last_crawl_time TEXT,
+        estimated_remaining_items INTEGER,
+        progress_percentage REAL DEFAULT 0.0,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
     )
     """,
     """
@@ -97,6 +127,42 @@ SCHEMA_STATEMENTS = (
         updated_at TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS item_skus (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        result_item_id INTEGER NOT NULL,
+        sku_name TEXT NOT NULL,
+        sku_price TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (result_item_id) REFERENCES result_items(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS task_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        execution_mode TEXT NOT NULL DEFAULT 'periodic',
+        batch_number INTEGER NOT NULL DEFAULT 0,
+        run_start_time TEXT NOT NULL,
+        run_end_time TEXT,
+        pages_crawled INTEGER NOT NULL DEFAULT 0,
+        items_found INTEGER NOT NULL DEFAULT 0,
+        items_processed INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'running',
+        error_message TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    )
+    """,
+)
+
+# 索引定义：在表和列都存在后创建
+INDEX_STATEMENTS = (
+    """
+    CREATE INDEX IF NOT EXISTS idx_task_runs_task_id_batch
+    ON task_runs(task_id, execution_mode, batch_number DESC)
+    """,
     "CREATE INDEX IF NOT EXISTS idx_tasks_name ON tasks(task_name)",
     """
     CREATE INDEX IF NOT EXISTS idx_results_filename_crawl
@@ -140,9 +206,20 @@ def _apply_pragmas(conn: sqlite3.Connection) -> None:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    for statement in SCHEMA_STATEMENTS:
+    # 1. 首先创建所有表（不包括索引）
+    for statement in TABLE_STATEMENTS:
         conn.execute(statement)
+
+    # 2. 执行所有迁移（添加缺失的列）
     _migrate_result_items_status(conn)
+    _migrate_tasks_execution_mode(conn)
+    _migrate_add_task_runs(conn)
+    _migrate_add_estimated_remaining_items(conn)
+
+    # 3. 最后创建所有索引（此时所有列都已存在）
+    for statement in INDEX_STATEMENTS:
+        conn.execute(statement)
+
     conn.commit()
 
 
@@ -164,6 +241,86 @@ def _migrate_result_items_status(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_results_filename_status_crawl"
         " ON result_items(result_filename, status, crawl_time DESC)"
+    )
+
+
+def _migrate_tasks_execution_mode(conn: sqlite3.Connection) -> None:
+    """为 tasks 表添加连续抓取相关字段"""
+    row = conn.execute(
+        "SELECT value FROM app_metadata WHERE key = 'migration:tasks_execution_mode'"
+    ).fetchone()
+    if row is not None:
+        return
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+    if "execution_mode" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'periodic'")
+    if "max_pages" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN max_pages INTEGER NOT NULL DEFAULT 3")
+    if "sleep_interval_min" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN sleep_interval_min INTEGER NOT NULL DEFAULT 180")
+    if "sleep_interval_max" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN sleep_interval_max INTEGER NOT NULL DEFAULT 300")
+    if "max_page_limit" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN max_page_limit INTEGER")
+    conn.execute(
+        "INSERT OR REPLACE INTO app_metadata(key, value) VALUES ('migration:tasks_execution_mode', 'done')"
+    )
+
+
+def _migrate_add_task_runs(conn: sqlite3.Connection) -> None:
+    """新增 task_runs 表（仅执行一次）。"""
+    row = conn.execute(
+        "SELECT value FROM app_metadata WHERE key = 'migration:add_task_runs'"
+    ).fetchone()
+    if row is not None:
+        # 表已存在，检查是否需要添加新字段
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(task_runs)").fetchall()]
+        if "execution_mode" not in cols:
+            # 添加执行模式字段
+            conn.execute("ALTER TABLE task_runs ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'periodic'")
+        if "batch_number" not in cols:
+            # 添加批次号字段
+            conn.execute("ALTER TABLE task_runs ADD COLUMN batch_number INTEGER NOT NULL DEFAULT 0")
+        return
+    # CREATE TABLE IF NOT EXISTS 已在 SCHEMA_STATEMENTS 中处理
+    # 这里只需标记迁移完成
+    conn.execute(
+        "INSERT OR REPLACE INTO app_metadata(key, value) VALUES ('migration:add_task_runs', 'done')"
+    )
+
+
+def _migrate_add_estimated_remaining_items(conn: sqlite3.Connection) -> None:
+    """为 task_progress 和 tasks 表添加 estimated_remaining_items 列（如果缺失）。"""
+    row = conn.execute(
+        "SELECT value FROM app_metadata WHERE key = 'migration:add_estimated_remaining_items'"
+    ).fetchone()
+    if row is not None:
+        return
+
+    # 检查并添加到 task_progress 表
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(task_progress)").fetchall()]
+    if "estimated_remaining_items" not in cols:
+        try:
+            conn.execute(
+                "ALTER TABLE task_progress ADD COLUMN estimated_remaining_items INTEGER"
+            )
+            print("[迁移] ✅ 已添加 task_progress.estimated_remaining_items 列")
+        except Exception as e:
+            print(f"[迁移] ⚠️ 添加 task_progress.estimated_remaining_items 失败: {e}")
+
+    # 检查并添加到 tasks 表
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+    if "estimated_remaining_items" not in cols:
+        try:
+            conn.execute(
+                "ALTER TABLE tasks ADD COLUMN estimated_remaining_items INTEGER"
+            )
+            print("[迁移] ✅ 已添加 tasks.estimated_remaining_items 列")
+        except Exception as e:
+            print(f"[迁移] ⚠️ 添加 tasks.estimated_remaining_items 失败: {e}")
+
+    conn.execute(
+        "INSERT OR REPLACE INTO app_metadata(key, value) VALUES ('migration:add_estimated_remaining_items', 'done')"
     )
 
 

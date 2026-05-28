@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { ResultItem } from '@/types/result.d.ts'
+import type { ResultItem, SKUItem } from '@/types/result.d.ts'
 import {
   Card,
   CardContent,
@@ -10,7 +10,7 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import Badge from '@/components/ui/badge/Badge.vue'
-import { ExternalLink, TrendingUp, TrendingDown, Info, User, Clock, CheckCircle2, XCircle, AlertCircle, EyeOff, Eye } from 'lucide-vue-next'
+import { ExternalLink, TrendingUp, TrendingDown, Info, User, Clock, CheckCircle2, XCircle, AlertCircle, EyeOff, Eye, ChevronDown } from 'lucide-vue-next'
 import { formatDateTime } from '@/i18n'
 
 interface Props {
@@ -50,6 +50,12 @@ const hiddenLabel = computed(() => {
 })
 
 const expanded = ref(false)
+
+// SKU 功能
+const skuList = computed<SKUItem[]>(() => {
+  return props.item.SKU列表 || props.item.商品信息.SKU列表 || []
+})
+const hasSku = computed(() => skuList.value.length > 0)
 </script>
 
 <template>
@@ -170,6 +176,20 @@ const expanded = ref(false)
           </div>
         </div>
       </div>
+
+      <!-- SKU Options -->
+      <details v-if="hasSku" class="mt-4 group-sku">
+        <summary class="text-sm text-blue-600 cursor-pointer hover:text-blue-800 flex items-center gap-1 select-none">
+          <ChevronDown class="w-4 h-4 transition-transform group-sku-open:rotate-180" />
+          <span>{{ t('results.card.viewSkuOptions', { count: skuList.length }) }}</span>
+        </summary>
+        <div class="mt-2 space-y-1 bg-slate-50/50 p-2 rounded-lg border">
+          <div v-for="(sku, index) in skuList" :key="index" class="text-sm text-gray-600 pl-2 border-l-2 border-blue-200">
+            <span class="font-medium">{{ sku.sku_name }}</span>
+            <span v-if="sku.sku_price" class="text-red-600 ml-1">: ¥{{ sku.sku_price }}</span>
+          </div>
+        </div>
+      </details>
     </CardContent>
 
     <CardFooter class="px-4 py-3 bg-slate-50/30 border-t border-slate-100/60 flex items-center justify-between text-[10px]">

@@ -47,9 +47,12 @@ class ProcessService:
     async def _invoke_hook(self, hook: LifecycleHook | None, task_id: int) -> None:
         if hook is None:
             return
-        result = hook(task_id)
-        if asyncio.iscoroutine(result):
-            await result
+        try:
+            result = hook(task_id)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            print(f"[ProcessService] 生命周期钩子执行失败 (task_id={task_id}): {exc}")
 
     def _resolve_cookie_path(self, task_name: str) -> str | None:
         """Best-effort cookie/state path for a task."""
@@ -86,11 +89,13 @@ class ProcessService:
         log_file_handle = open(log_file_path, "a", encoding="utf-8")
         return log_file_path, log_file_handle
 
-    def _build_spawn_command(self, task_name: str) -> list[str]:
+    def _build_spawn_command(self, task_id: int, task_name: str) -> list[str]:
         command = [
             sys.executable,
             "-u",
             "spider_v2.py",
+            "--task-id",
+            str(task_id),
             "--task-name",
             task_name,
         ]
@@ -101,6 +106,7 @@ class ProcessService:
 
     async def _spawn_process(
         self,
+        task_id: int,
         task_name: str,
         log_file_handle: TextIO,
     ) -> asyncio.subprocess.Process:
@@ -109,7 +115,7 @@ class ProcessService:
         child_env["PYTHONIOENCODING"] = "utf-8"
         child_env["PYTHONUTF8"] = "1"
         return await asyncio.create_subprocess_exec(
-            *self._build_spawn_command(task_name),
+            *self._build_spawn_command(task_id, task_name),
             stdout=log_file_handle,
             stderr=log_file_handle,
             preexec_fn=preexec_fn,
@@ -149,7 +155,7 @@ class ProcessService:
         log_file_handle = None
         try:
             log_file_path, log_file_handle = self._open_log_file(task_id, task_name)
-            process = await self._spawn_process(task_name, log_file_handle)
+            process = await self._spawn_process(task_id, task_name, log_file_handle)
         except Exception as exc:
             self._close_log_handle(log_file_handle)
             print(f"启动任务 '{task_name}' 失败: {exc}")
@@ -157,6 +163,8 @@ class ProcessService:
 
         self._register_runtime(task_id, task_name, process, log_file_path, log_file_handle)
         print(f"启动任务 '{task_name}' (PID: {process.pid})")
+        # 写入 PID 文件，供服务重启时检测孤儿进程
+        self._write_pid_file(task_id, process.pid)
         await self._invoke_hook(self._on_started, task_id)
         return True
 
@@ -209,6 +217,26 @@ class ProcessService:
         self.task_names.pop(task_id, None)
         self._close_log_handle(self.log_handles.pop(task_id, None))
         self.exit_watchers.pop(task_id, None)
+        # 删除 PID 文件
+        self._remove_pid_file(task_id)
+
+    @staticmethod
+    def _pid_file_path(task_id: int) -> str:
+        return os.path.join("logs", "pids", f"task_{task_id}.pid")
+
+    def _write_pid_file(self, task_id: int, pid: int) -> None:
+        try:
+            os.makedirs(os.path.join("logs", "pids"), exist_ok=True)
+            with open(self._pid_file_path(task_id), "w") as f:
+                f.write(str(pid))
+        except Exception as exc:
+            print(f"[ProcessService] 写入 PID 文件失败 (task_id={task_id}): {exc}")
+
+    def _remove_pid_file(self, task_id: int) -> None:
+        with contextlib.suppress(Exception):
+            pid_path = self._pid_file_path(task_id)
+            if os.path.exists(pid_path):
+                os.remove(pid_path)
 
     def _close_log_handle(self, log_handle: TextIO | None) -> None:
         if log_handle is None:

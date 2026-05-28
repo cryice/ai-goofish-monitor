@@ -279,3 +279,110 @@ async def stop_task(
         raise HTTPException(status_code=404, detail="任务未找到")
     await process_service.stop_task(task_id)
     return {"message": f"任务ID {task_id} 已发送停止信号"}
+
+@router.get("/progress/{task_id}", response_model=dict)
+async def get_task_progress(
+    task_id: int,
+    task_service: TaskService = Depends(get_task_service),
+):
+    """获取任务进度信息"""
+    task = await task_service.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务未找到")
+    
+    # 获取任务的最新进度信息
+    progress = await task_service.get_task_progress(task_id)
+    
+    # 获取任务的基本信息
+    task_info = {
+        "task_id": task.id,
+        "task_name": task.task_name,
+        "enabled": task.enabled,
+        "is_running": task.is_running,
+        "keyword": task.keyword,
+        "last_error": task.last_error,
+        "error_timestamp": task.error_timestamp
+    }
+    
+    # 整合任务信息和进度信息
+    result = {
+        "task_info": task_info,
+        "progress": {
+            "current_page": task.current_page,
+            "total_items_found": task.total_items_found,
+            "items_processed": task.items_processed,
+            "estimated_remaining_items": task.estimated_remaining_items,
+            "progress_percentage": task.progress_percentage,
+            "last_crawl_time": task.last_crawl_time
+        }
+    }
+    
+    # 如果有详细的进度记录，也包含进去
+    if progress:
+        result["latest_progress_detail"] = {
+            "id": progress.id,
+            "current_page": progress.current_page,
+            "total_items_found": progress.total_items_found,
+            "items_processed": progress.items_processed,
+            "estimated_remaining_items": progress.estimated_remaining_items,
+            "progress_percentage": progress.progress_percentage,
+            "last_crawl_time": progress.last_crawl_time,
+            "created_at": progress.created_at,
+            "updated_at": progress.updated_at
+        }
+    
+    return result
+
+@router.get("/progress-history/{task_id}", response_model=list)
+async def get_task_progress_history(
+    task_id: int,
+    task_service: TaskService = Depends(get_task_service),
+):
+    """获取任务进度历史"""
+    task = await task_service.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务未找到")
+    
+    history = await task_service.get_task_history(task_id)
+    return [
+        {
+            "id": item.id,
+            "current_page": item.current_page,
+            "total_items_found": item.total_items_found,
+            "items_processed": item.items_processed,
+            "estimated_remaining_items": item.estimated_remaining_items,
+            "progress_percentage": item.progress_percentage,
+            "last_crawl_time": item.last_crawl_time,
+            "created_at": item.created_at,
+            "updated_at": item.updated_at
+        }
+        for item in history
+    ]
+
+@router.get("/runs/{task_id}", response_model=list)
+async def get_task_runs(
+    task_id: int,
+    task_service: TaskService = Depends(get_task_service),
+):
+    """获取任务的完整执行记录（每次 start→stop 一条）"""
+    from src.infrastructure.persistence.sqlite_task_run_repository import SqliteTaskRunRepository
+    task = await task_service.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务未找到")
+
+    run_repo = SqliteTaskRunRepository()
+    runs = await run_repo.find_all_by_task_id(task_id)
+    return [
+        {
+            "id": run.id,
+            "task_id": run.task_id,
+            "run_start_time": run.run_start_time,
+            "run_end_time": run.run_end_time,
+            "pages_crawled": run.pages_crawled,
+            "items_found": run.items_found,
+            "items_processed": run.items_processed,
+            "status": run.status,
+            "error_message": run.error_message,
+        }
+        for run in runs
+    ]

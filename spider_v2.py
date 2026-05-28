@@ -31,6 +31,7 @@ async def main():
     parser.add_argument("--debug-limit", type=int, default=0, help="调试模式：每个任务仅处理前 N 个新商品（0 表示无限制）")
     parser.add_argument("--config", type=str, help="指定任务配置文件路径（传入时优先读取 JSON）")
     parser.add_argument("--task-name", type=str, help="只运行指定名称的单个任务 (用于定时任务调度)")
+    parser.add_argument("--task-id", type=int, help="任务ID (用于进度跟踪)")
     args = parser.parse_args()
 
     if args.config:
@@ -188,8 +189,17 @@ async def main():
 
     tasks = []
     for task_conf in active_task_configs:
+        # Determine the task_id - either from command line arg or by looking up the task name in the database
+        task_id = args.task_id
+        if not task_id and args.task_name:
+            # Look up the task_id from the database using the task name
+            from src.infrastructure.persistence.sqlite_task_repository import find_task_by_name_sync
+            task_from_db = find_task_by_name_sync(args.task_name)
+            if task_from_db:
+                task_id = task_from_db.id
+
         print(f"-> 任务 '{task_conf['task_name']}' 已加入执行队列。")
-        tasks.append(asyncio.create_task(scrape_xianyu(task_config=task_conf, debug_limit=args.debug_limit)))
+        tasks.append(asyncio.create_task(scrape_xianyu(task_config=task_conf, debug_limit=args.debug_limit, task_id=task_id)))
 
     async def _shutdown_watcher():
         await stop_event.wait()

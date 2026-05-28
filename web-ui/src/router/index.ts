@@ -29,6 +29,12 @@ const routes = [
         meta: { titleKey: 'routes.tasks', requiresAuth: true },
       },
       {
+        path: 'task-progress',
+        name: 'TaskProgress',
+        component: () => import('@/views/TaskProgressView.vue'),
+        meta: { titleKey: 'routes.taskProgress', requiresAuth: true },
+      },
+      {
         path: 'accounts',
         name: 'Accounts',
         component: () => import('@/views/AccountsView.vue'),

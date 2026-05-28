@@ -171,6 +171,7 @@ export function useResults() {
   on('results_updated', async () => {
     const oldFile = selectedFile.value
     await fetchFiles()
+    await fetchFileTaskNames()  // 文件更新后重新获取任务名称
     // If the selected file remains the same, refresh its content (in case of append)
     // If it changed (e.g. from null to new file), the watcher will handle it.
     if (selectedFile.value && selectedFile.value === oldFile) {
@@ -181,11 +182,13 @@ export function useResults() {
 
   on('tasks_updated', () => {
     fetchTaskNameMap()
+    fetchFileTaskNames()  // 任务更新后重新获取文件的任务名称
   })
 
   async function refreshResults() {
     const current = selectedFile.value
     await fetchFiles()
+    await fetchFileTaskNames()  // 刷新时重新获取任务名称
     if (selectedFile.value && selectedFile.value === current) {
       await fetchResults()
       await fetchInsights()
@@ -273,10 +276,57 @@ export function useResults() {
     { immediate: true }
   )
 
+  const fileTaskNames = ref<Record<string, string>>({})
+
+  async function fetchFileTaskNames() {
+    /**
+     * 从结果项中获取每个文件对应的实际任务名称
+     * 这样可以准确显示任务名，即使有多个任务使用同样的关键词
+     */
+    try {
+      const mapping: Record<string, string> = {}
+      for (const file of files.value) {
+        try {
+          // 获取该文件的第一条结果项
+          const data = await resultsApi.getResultContent(file, {
+            page: 1,
+            limit: 1,
+            recommended_only: false,
+            ai_recommended_only: false,
+            keyword_recommended_only: false,
+            include_hidden: false,
+            sort_by: 'crawl_time',
+            sort_order: 'desc',
+          })
+          if (data?.items && data.items.length > 0) {
+            // 从结果项的 "任务名称" 字段获取任务名称
+            const taskName = (data.items[0] as any)["任务名称"]
+            if (taskName) {
+              mapping[file] = taskName
+            }
+          }
+        } catch (e) {
+          // 如果获取单个文件失败，跳过
+          console.warn(`获取文件 ${file} 的任务名称失败:`, e)
+        }
+      }
+      fileTaskNames.value = mapping
+    } catch (e) {
+      if (e instanceof Error) error.value = e
+    }
+  }
+
   const fileOptions = computed(() =>
     files.value.map((file) => {
-      const keyword = getKeywordFromFilename(file)
-      const taskName = taskNameByKeyword.value[keyword]
+      // 优先级：
+      // 1. 从结果项中的 task_name 字段读取（最准确）
+      // 2. 从 keyword 名称映射读取
+      // 3. 显示"未命名"
+      let taskName = fileTaskNames.value[file]
+      if (!taskName) {
+        const keyword = getKeywordFromFilename(file)
+        taskName = taskNameByKeyword.value[keyword]
+      }
       return {
         value: file,
         taskName: taskName || t('common.unnamed'),
@@ -291,6 +341,7 @@ export function useResults() {
   onMounted(() => {
     fetchFiles()
     fetchTaskNameMap()
+    fetchFileTaskNames()
   })
 
   return {

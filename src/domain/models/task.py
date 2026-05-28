@@ -115,7 +115,8 @@ class Task(BaseModel):
     keyword: str
     description: Optional[str] = ""
     analyze_images: bool = True
-    max_pages: int
+    max_pages: int = 3
+    start_page: int = 1
     personal_only: bool
     min_price: Optional[str] = None
     max_price: Optional[str] = None
@@ -130,6 +131,20 @@ class Task(BaseModel):
     decision_mode: Literal["ai", "keyword"] = "ai"
     keyword_rules: List[str] = Field(default_factory=list)
     is_running: bool = False
+    execution_mode: Literal["periodic", "continuous"] = "periodic"
+    sleep_interval_min: int = 180
+    sleep_interval_max: int = 300
+    max_page_limit: Optional[int] = None
+
+    # 任务进度跟踪字段
+    current_page: int = Field(default=0, description="当前采集页码")
+    total_items_found: int = Field(default=0, description="已找到的商品总数")
+    items_processed: int = Field(default=0, description="已处理的商品数")
+    last_crawl_time: Optional[str] = Field(default=None, description="最后采集时间")
+    estimated_remaining_items: Optional[int] = Field(default=None, description="预估剩余商品数")
+    progress_percentage: float = Field(default=0.0, description="进度百分比")
+    last_error: Optional[str] = Field(default=None, description="最后一次错误信息")
+    error_timestamp: Optional[str] = Field(default=None, description="错误时间戳")
 
     @model_validator(mode="before")
     @classmethod
@@ -166,6 +181,7 @@ class TaskCreate(BaseModel):
     description: Optional[str] = ""
     analyze_images: bool = True
     max_pages: int = 3
+    start_page: int = 1
     personal_only: bool = True
     min_price: Optional[str] = None
     max_price: Optional[str] = None
@@ -179,6 +195,10 @@ class TaskCreate(BaseModel):
     region: Optional[str] = None
     decision_mode: Literal["ai", "keyword"] = "ai"
     keyword_rules: List[str] = Field(default_factory=list)
+    execution_mode: Literal["periodic", "continuous"] = "periodic"
+    sleep_interval_min: int = 180
+    sleep_interval_max: int = 300
+    max_page_limit: Optional[int] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -233,6 +253,7 @@ class TaskUpdate(BaseModel):
     description: Optional[str] = None
     analyze_images: Optional[bool] = None
     max_pages: Optional[int] = None
+    start_page: Optional[int] = None
     personal_only: Optional[bool] = None
     min_price: Optional[str] = None
     max_price: Optional[str] = None
@@ -247,6 +268,18 @@ class TaskUpdate(BaseModel):
     decision_mode: Optional[Literal["ai", "keyword"]] = None
     keyword_rules: Optional[List[str]] = None
     is_running: Optional[bool] = None
+    execution_mode: Optional[Literal["periodic", "continuous"]] = None
+    sleep_interval_min: Optional[int] = None
+    sleep_interval_max: Optional[int] = None
+    max_page_limit: Optional[int] = None
+    current_page: Optional[int] = None
+    total_items_found: Optional[int] = None
+    items_processed: Optional[int] = None
+    last_crawl_time: Optional[str] = None
+    estimated_remaining_items: Optional[int] = None
+    progress_percentage: Optional[float] = None
+    last_error: Optional[str] = None
+    error_timestamp: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -302,6 +335,7 @@ class TaskGenerateRequest(BaseModel):
     min_price: Optional[str] = None
     max_price: Optional[str] = None
     max_pages: int = 3
+    start_page: int = 1
     cron: Optional[str] = None
     account_state_file: Optional[str] = None
     account_strategy: Literal["auto", "fixed", "rotate"] = "auto"

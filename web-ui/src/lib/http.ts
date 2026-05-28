@@ -5,9 +5,15 @@ interface FetchOptions extends RequestInit {
 }
 
 export async function http(url: string, options: FetchOptions = {}) {
-  const { logout } = useAuth()
-  
+  const { logout, getToken } = useAuth()
+
   const headers = new Headers(options.headers)
+
+  // 添加认证 token
+  const token = getToken()
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
 
   // Handle Query Params
   let fullUrl = url
@@ -32,9 +38,8 @@ export async function http(url: string, options: FetchOptions = {}) {
   const response = await fetch(fullUrl, config)
 
   if (response.status === 401) {
-    // Basic Auth failed or session expired
+    // 认证失败或会话过期
     logout()
-    // Optional: Redirect to login handled by router or state change
     throw new Error('Unauthorized')
   }
 

@@ -8,6 +8,14 @@ export interface Task {
   description: string;
   analyze_images: boolean;
   max_pages: number;
+  max_page_limit?: number;
+  start_page?: number;
+  execution_mode?: 'periodic' | 'continuous';
+  start_page?: number;
+  current_page?: number;
+  max_page_limit?: number;
+  sleep_interval_min?: number;
+  sleep_interval_max?: number;
   personal_only: boolean;
   min_price: string | null;
   max_price: string | null;
@@ -23,6 +31,13 @@ export interface Task {
   decision_mode: 'ai' | 'keyword';
   keyword_rules: string[];
   is_running: boolean;
+  total_items_found?: number;
+  items_processed?: number;
+  last_crawl_time?: string | null;
+  estimated_remaining_items?: number | null;
+  progress_percentage?: number;
+  last_error?: string | null;
+  error_timestamp?: string | null;
 }
 
 export type TaskGenerationStatus = 'queued' | 'running' | 'completed' | 'failed';
@@ -65,6 +80,9 @@ export interface TaskGenerateRequest {
   min_price?: string | null;
   max_price?: string | null;
   max_pages?: number;
+  max_page_limit?: number;
+  start_page?: number;
+  execution_mode?: 'periodic' | 'continuous';
   cron?: string | null;
   account_state_file?: string | null;
   account_strategy?: 'auto' | 'fixed' | 'rotate';

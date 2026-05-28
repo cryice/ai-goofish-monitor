@@ -57,6 +57,28 @@ class SqliteTaskRepository(TaskRepository):
     async def delete(self, task_id: int) -> bool:
         return await asyncio.to_thread(self._delete_sync, task_id)
 
+    async def update_progress_only(
+        self,
+        task_id: int,
+        current_page: int,
+        total_items_found: int,
+        items_processed: int,
+        estimated_remaining_items: Optional[int],
+        progress_percentage: float,
+        last_crawl_time: Optional[str],
+    ) -> None:
+        """只更新进度字段，不触碰 is_running 等其他字段，避免全量覆盖引起的竞态。"""
+        return await asyncio.to_thread(
+            self._update_progress_only_sync,
+            task_id,
+            current_page,
+            total_items_found,
+            items_processed,
+            estimated_remaining_items,
+            progress_percentage,
+            last_crawl_time,
+        )
+
     def _find_all_sync(self) -> List[Task]:
         bootstrap_sqlite_storage(
             self.db_path,
@@ -89,22 +111,71 @@ class SqliteTaskRepository(TaskRepository):
                 """
                 INSERT OR REPLACE INTO tasks (
                     id, task_name, enabled, keyword, description, analyze_images,
-                    max_pages, personal_only, min_price, max_price, cron,
+                    max_pages, start_page, personal_only, min_price, max_price, cron,
                     ai_prompt_base_file, ai_prompt_criteria_file, account_state_file,
                     account_strategy, free_shipping, new_publish_option, region,
-                    decision_mode, keyword_rules_json, is_running
+                    decision_mode, keyword_rules_json, is_running,
+                    execution_mode, sleep_interval_min, sleep_interval_max, max_page_limit,
+                    current_page, total_items_found, items_processed, last_crawl_time, progress_percentage
                 ) VALUES (
                     :id, :task_name, :enabled, :keyword, :description, :analyze_images,
-                    :max_pages, :personal_only, :min_price, :max_price, :cron,
+                    :max_pages, :start_page, :personal_only, :min_price, :max_price, :cron,
                     :ai_prompt_base_file, :ai_prompt_criteria_file, :account_state_file,
                     :account_strategy, :free_shipping, :new_publish_option, :region,
-                    :decision_mode, :keyword_rules_json, :is_running
+                    :decision_mode, :keyword_rules_json, :is_running,
+                    :execution_mode, :sleep_interval_min, :sleep_interval_max, :max_page_limit,
+                    :current_page, :total_items_found, :items_processed, :last_crawl_time, :progress_percentage
                 )
                 """,
                 payload,
             )
             conn.commit()
         return task.model_copy(update={"id": task_id})
+
+    def _update_progress_only_sync(
+        self,
+        task_id: int,
+        current_page: int,
+        total_items_found: int,
+        items_processed: int,
+        estimated_remaining_items: Optional[int],
+        progress_percentage: float,
+        last_crawl_time: Optional[str],
+    ) -> None:
+        """只用 UPDATE 修改进度列，绝对不碰 is_running 等其他字段。"""
+        bootstrap_sqlite_storage(
+            self.db_path,
+            legacy_config_file=self.legacy_config_file,
+        )
+        with sqlite_connection(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE tasks SET
+                    current_page = ?,
+                    total_items_found = ?,
+                    items_processed = ?,
+                    estimated_remaining_items = ?,
+                    progress_percentage = ?,
+                    last_crawl_time = ?
+                WHERE id = ?
+                """,
+                (
+                    current_page,
+                    total_items_found,
+                    items_processed,
+                    estimated_remaining_items or 0,
+                    progress_percentage,
+                    last_crawl_time,
+                    task_id,
+                ),
+            )
+            conn.commit()
+
+            # 诊断：如果没有任何行被更新，打印警告
+            if cursor.rowcount == 0:
+                print(f"[警告] UPDATE 未找到任务 ID {task_id}，可能任务不存在或已删除")
+            elif cursor.rowcount == 1:
+                print(f"[进度更新成功] 任务 {task_id}: page={current_page}, found={total_items_found}, processed={items_processed}")
 
     def _delete_sync(self, task_id: int) -> bool:
         bootstrap_sqlite_storage(
@@ -129,4 +200,12 @@ class SqliteTaskRepository(TaskRepository):
         values["is_running"] = int(task.is_running)
         values["keyword_rules_json"] = json.dumps(task.keyword_rules or [], ensure_ascii=False)
         values.pop("keyword_rules", None)
+
+        # 处理进度字段
+        values["current_page"] = getattr(task, 'current_page', 0) or 0
+        values["total_items_found"] = getattr(task, 'total_items_found', 0) or 0
+        values["items_processed"] = getattr(task, 'items_processed', 0) or 0
+        values["last_crawl_time"] = getattr(task, 'last_crawl_time', None) or None
+        values["progress_percentage"] = getattr(task, 'progress_percentage', 0.0) or 0.0
+
         return values

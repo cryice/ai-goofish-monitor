@@ -46,6 +46,9 @@ from src.rotation import RotationPool, load_state_files, parse_proxy_pool, Rotat
 from src.failure_guard import FailureGuard
 from src.services.account_strategy_service import resolve_account_runtime_plan
 from src.infrastructure.persistence.storage_names import build_result_filename
+from src.services.task_service import TaskService
+from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
+from src.infrastructure.persistence.sqlite_task_run_repository import SqliteTaskRunRepository
 from src.services.item_analysis_dispatcher import (
     ItemAnalysisDispatcher,
     ItemAnalysisJob,
@@ -442,10 +445,11 @@ async def scrape_user_profile(context, user_id: str) -> dict:
     return profile_data
 
 
-async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
+async def scrape_xianyu(task_config: dict, debug_limit: int = 0, progress_callback=None, task_id: int = None):
     """
     【核心执行器】
     根据单个任务配置，异步爬取闲鱼商品数据，并对每个新发现的商品进行实时的、独立的AI分析和通知。
+    支持 continuous 模式：循环执行多个批次，每批次之间等待指定时间。
     """
     keyword = task_config["keyword"]
     max_pages = task_config.get("max_pages", 1)
@@ -464,6 +468,148 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
     if new_publish_option == "__none__":
         new_publish_option = ""
     region_filter = (task_config.get("region") or "").strip()
+
+    # 初始化：默认从第1页开始，后续如果能从数据库读取会被覆盖
+    resume_from_page = 1
+
+    # 从task_config读取配置（默认值为任务表定义的180/300）
+    execution_mode = str(task_config.get("execution_mode", "periodic")).strip().lower()
+    max_pages = int(task_config.get("max_pages", 1))
+    sleep_interval_min = int(task_config.get("sleep_interval_min", 180))
+    sleep_interval_max = int(task_config.get("sleep_interval_max", 300))
+    max_page_limit = int(task_config.get("max_page_limit", 0)) if task_config.get("max_page_limit") else 0
+
+    log_time(f"[任务配置] sleep_interval={sleep_interval_min}-{sleep_interval_max}s, max_pages={max_pages}, max_page_limit={max_page_limit}, execution_mode={execution_mode}")
+
+    log_time(f"[断点续传] initial resume_from_page={resume_from_page}")
+
+    # 如果提供了任务ID，初始化进度报告器
+    if task_id is not None:
+        from src.progress_reporter import set_progress_reporter, ProgressReporter
+        reporter = ProgressReporter(task_id, task_config.get("task_name", "Untitled Task"))
+        set_progress_reporter(reporter)
+
+    from src.infrastructure.persistence.sqlite_task_progress_repository import SqliteTaskProgressRepository
+    task_progress_service = (
+        TaskService(SqliteTaskRepository(), SqliteTaskProgressRepository()) if task_id is not None else None
+    )
+
+    # 断点续传: 仅 continuous 模式支持跨次执行续传，periodic 模式每次从 start_page 开始
+    if task_progress_service:
+        try:
+            # 先从数据库获取任务配置（包括start_page和current_page）
+            sql_repo = SqliteTaskRepository()
+            db_task = await sql_repo.find_by_id(task_id)
+
+            # 获取起始页配置（用户配置的起始页）
+            configured_start_page = db_task.start_page if db_task and db_task.start_page else 1
+
+            if execution_mode == "continuous":
+                # continuous 模式：从上次停的页码继续
+                history_progress = await task_progress_service.get_task_progress(task_id)
+                if history_progress and history_progress.current_page and history_progress.current_page >= configured_start_page:
+                    resume_from_page = history_progress.current_page + 1
+                    log_time(f"[断点续传] continuous模式，历史记录第 {history_progress.current_page} 页，继续从第 {resume_from_page} 页开始...")
+                elif db_task and db_task.current_page and db_task.current_page > 0:
+                    resume_from_page = db_task.current_page + 1
+                    log_time(f"[断点续传] continuous模式，任务表记录第 {db_task.current_page} 页，从第 {resume_from_page} 页开始...")
+                elif configured_start_page > 1:
+                    resume_from_page = configured_start_page
+                    log_time(f"[断点续传] continuous模式，使用配置的起始页 {configured_start_page}...")
+                else:
+                    log_time(f"[断点续传] continuous模式，无历史记录，从第1页开始...")
+            else:
+                # periodic 模式：每次执行从配置的起始页重新开始，不跨次续传
+                resume_from_page = configured_start_page if configured_start_page > 1 else 1
+                log_time(f"[断点续传] periodic模式，每次从第 {resume_from_page} 页重新开始...")
+        except Exception as e:
+            print(f"获取断点进度失败: {e}")
+            resume_from_page = 1
+
+    async def _record_task_progress(
+        current_page: int,
+        total_items_found: int,
+        items_processed: int,
+        estimated_remaining_items: Optional[int] = None,
+    ) -> None:
+        """
+        记录任务进度。
+
+        页码定义：
+        - current_page: 已抓取的最后一个页面号（从 start_page 开始计数）
+        - 例如：start_page=4, 已处理第 4、5、6 页，则 current_page=6
+        - 下次 resume_from_page = current_page + 1 = 7
+        """
+        if task_progress_service is None or task_id is None:
+            log_time(f"[进度跳过] task_id={task_id}, task_progress_service={task_progress_service is not None}")
+            return
+        try:
+            # 计算已处理的页数（用于显示）
+            pages_processed = current_page - resume_from_page + 1 if resume_from_page > 0 else current_page
+            log_time(f"[进度记录] 当前页={current_page}, 已处理页数={pages_processed}, 发现商品={total_items_found}, 已处理={items_processed}")
+
+            # 第一步：更新数据库中的任务进度
+            await task_progress_service.update_task_progress(
+                task_id,
+                current_page,
+                total_items_found,
+                items_processed,
+                estimated_remaining_items,
+            )
+
+            # 第二步：通过 HTTP 调用主进程的 API 来推送 WebSocket 消息
+            # 这是为了解决子进程无法访问主进程全局变量的问题
+            try:
+                import httpx
+                from datetime import datetime
+
+                # 计算进度百分比
+                total_expected = total_items_found + (estimated_remaining_items or 0)
+                progress_percentage = (items_processed / total_expected * 100) if total_expected > 0 else 0.0
+
+                progress_data = {
+                    "task_id": task_id,
+                    "current_page": current_page,
+                    "total_items_found": total_items_found,
+                    "items_processed": items_processed,
+                    "estimated_remaining_items": estimated_remaining_items or 0,
+                    "progress_percentage": round(progress_percentage, 2),
+                    "last_crawl_time": datetime.now().isoformat(),
+                    "status": "running"
+                }
+
+                # 通过 HTTP POST 调用主进程的 WebSocket 推送 API
+                # 使用 127.0.0.1 而不是 localhost（某些环境中 localhost 解析可能有问题）
+                server_host = os.getenv('SERVER_HOST', '127.0.0.1')
+                server_port = os.getenv('SERVER_PORT', '8000')
+                api_url = f"http://{server_host}:{server_port}/api/internal/broadcast-task-progress/{task_id}"
+
+                log_time(f"[WebSocket推送] 准备发送请求到: {api_url}")
+
+                async with httpx.AsyncClient(timeout=5) as client:
+                    try:
+                        response = await client.post(api_url, json=progress_data)
+                        if response.status_code == 200:
+                            log_time(f"[WebSocket推送] ✅ 成功推送进度更新 (status={response.status_code})")
+                        else:
+                            log_time(f"[WebSocket推送] ⚠️ 推送返回异常状态码 {response.status_code}")
+                            log_time(f"[WebSocket推送] 响应内容: {response.text[:200]}")
+                    except httpx.ConnectError as ce:
+                        log_time(f"[WebSocket推送] ❌ 无法连接到 {server_host}:{server_port} - {ce}")
+                    except httpx.TimeoutException as te:
+                        log_time(f"[WebSocket推送] ⏱️ 请求超时: {te}")
+                    except Exception as http_err:
+                        log_time(f"[WebSocket推送] ❌ HTTP 错误: {http_err}")
+            except Exception as ws_err:
+                # WebSocket 推送失败不应该影响进度记录，只记录日志
+                import traceback
+                log_time(f"[WebSocket推送] ⚠️ 推送异常: {ws_err}")
+                log_time(f"[WebSocket推送] 错误堆栈:\n{traceback.format_exc()}")
+
+        except Exception as progress_err:
+            import traceback
+            print(f"[进度错误] 记录任务进度失败: {progress_err}")
+            traceback.print_exc()  # 打印完整的错误堆栈
 
     processed_links = set()
     history_run_id = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -537,7 +683,12 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
 
     async def _run_scrape_attempt(state_file: str, proxy_server: Optional[str]) -> int:
         processed_item_count = 0
+        progress_total_items_found = 0
+        progress_items_processed = 0
         stop_scraping = False
+
+        # 不要在这里写入0，会覆盖之前的进度
+        # await _record_task_progress(0, 0, 0, None)
 
         if not os.path.exists(state_file):
             raise FileNotFoundError(f"登录状态文件不存在: {state_file}")
@@ -918,10 +1069,33 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     if final_response and final_response.ok
                     else initial_response
                 )
-                for page_num in range(1, max_pages + 1):
+                # 断点续传: 从上次停的页码开始
+                resume_offset = resume_from_page - 1
+                start_page = 1 + resume_offset
+                end_page = max_pages + resume_offset
+
+                # 如果需要跳过前面的页，直接翻到起始页
+                # 注意: advance_search_page 的 page_num 只用于日志，不控制目标页码
+                # 翻页循环只负责让浏览器前进，不能修改 start_page/end_page
+                if resume_from_page > 1:
+                    log_time(f"[断点] 需要跳到第 {resume_from_page} 页，先翻页...")
+                    for nav_step in range(resume_offset):
+                        page_advance_result = await advance_search_page(
+                            page=page, page_num=nav_step + 2,  # 仅用于日志: 2,3,4...
+                        )
+                        if not page_advance_result.advanced:
+                            log_time("翻页失败，从头开始")
+                            start_page = 1
+                            end_page = max_pages
+                            break
+                        current_response = page_advance_result.response
+                    else:
+                        log_time(f"[断点] 已成功翻到第 {resume_from_page} 页，开始处理...")
+
+                for page_num in range(start_page, end_page + 1):
                     if stop_scraping:
                         break
-                    log_time(f"开始处理第 {page_num}/{max_pages} 页 ...")
+                    log_time(f"开始处理第 {page_num}/{end_page} 页 ...")
 
                     if page_num > 1:
                         page_advance_result = await advance_search_page(
@@ -929,7 +1103,34 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                             page_num=page_num,
                         )
                         if not page_advance_result.advanced:
-                            break
+                            # 翻页失败处理
+                            log_time(f"❌ 无法翻页到第 {page_num} 页")
+
+                            # 对于 continuous 模式，翻页失败可能表示已到最后一页或网络问题
+                            if execution_mode == "continuous":
+                                # 如果已处理的页数接近或达到 max_page_limit，视为正常完成
+                                if max_page_limit > 0 and total_pages_processed >= max_page_limit - 1:
+                                    log_time(f"[Continuous] 已接近最大页数限制，视为完成")
+                                    break
+                                else:
+                                    # 记录更清晰的错误信息
+                                    error_msg = (
+                                        f"已处理{total_pages_processed}页，"
+                                        f"当前商品查询结果仅有{total_pages_processed}页，"
+                                        f"无法翻页至第{page_num}页，"
+                                        f"请人工核对商品页数或网络连接"
+                                    )
+                                    if max_page_limit > 0:
+                                        error_msg += f"（设置限制：{max_page_limit}页）"
+                                    last_error = error_msg
+                                    log_time(f"[错误] {last_error}")
+                                    break
+                            else:
+                                # periodic 模式：从头开始
+                                log_time("翻页失败，从头开始")
+                                start_page = 1
+                                end_page = max_pages
+                                break
                         current_response = page_advance_result.response
 
                     if not (current_response and current_response.ok):
@@ -953,18 +1154,56 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     )
 
                     total_items_on_page = len(basic_items)
+                    progress_total_items_found += total_items_on_page
+
+                    # 计算剩余页数和剩余商品数
+                    remaining_pages = max_page_limit - page_num if max_page_limit > 0 else max_pages - page_num
+                    estimated_remaining_items = max(0, remaining_pages * total_items_on_page)
+
+                    await _record_task_progress(
+                        page_num,
+                        progress_total_items_found,
+                        progress_items_processed,
+                        estimated_remaining_items,
+                    )
                     for i, item_data in enumerate(basic_items, 1):
                         if debug_limit > 0 and processed_item_count >= debug_limit:
                             log_time(
                                 f"已达到调试上限 ({debug_limit})，停止获取新商品。"
                             )
+                            # 立即写入进度记录
+                            if task_progress_service and task_id and page_num > 0:
+                                try:
+                                    await task_progress_service.update_task_progress(
+                                        task_id,
+                                        page_num,
+                                        progress_total_items_found,
+                                        progress_items_processed,
+                                        estimated_remaining_items,
+                                    )
+                                    log_time(f"[调试上限进度记录] page={page_num}, items={progress_items_processed}")
+                                except Exception as e:
+                                    print(f"记录进度失败: {e}")
                             stop_scraping = True
                             break
+
+                        progress_items_processed += 1
+                        remaining_in_batch = max_pages - page_num
+                        estimated_remaining_items = max(
+                            0,
+                            (total_items_on_page - i) + remaining_in_batch * total_items_on_page,
+                        )
 
                         unique_key = get_link_unique_key(item_data["商品链接"])
                         if unique_key in processed_links:
                             log_time(
                                 f"[页内进度 {i}/{total_items_on_page}] 商品 '{item_data['商品标题'][:20]}...' 已存在，跳过。"
+                            )
+                            await _record_task_progress(
+                                page_num,
+                                progress_total_items_found,
+                                progress_items_processed,
+                                estimated_remaining_items,
                             )
                             continue
 
@@ -1027,6 +1266,39 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
 
                                 # --- START: 新增代码块 ---
 
+                                # 从商品详情 API 中提取 SKU 信息
+                                import re as re_module
+                                try:
+                                    # 打印一些关键的 API 数据字段供调试
+                                    data_obj = detail_json.get("data", {})
+                                    top_level_keys = list(data_obj.keys())
+
+                                    # 尝试从 b2cItemDO 或 itemDO 中获取价格
+                                    for item_key in ["b2cItemDO", "itemDO"]:
+                                        item_info = data_obj.get(item_key, {})
+                                        if item_info:
+                                            # 尝试多种可能的价格字段
+                                            for price_key in ["originalPrice", "price", "currentPrice", "showPrice", "priceInfo", "priceWap", "lowPrice", "highPrice", "priceText"]:
+                                                main_price = item_info.get(price_key)
+                                                if main_price and str(main_price) != "0" and str(main_price) != "":
+                                                    item_data["_extracted_price"] = str(main_price)
+                                                    print(f"      从 {item_key}.{price_key} 提取主价格: {main_price}")
+                                                    break
+                                            # 也尝试从 picDetailDO 获取价格
+                                    pic_info = data_obj.get("picDetailDO", {})
+                                    if pic_info and not item_data.get("_extracted_price"):
+                                        for price_key in ["price", "originalPrice", "currentPrice"]:
+                                            price_val = pic_info.get(price_key)
+                                            if price_val and str(price_val) != "0":
+                                                item_data["_extracted_price"] = str(price_val)
+                                                print(f"      从 picDetailDO.{price_key} 提取主价格: {price_val}")
+                                                break
+
+                                    if not item_data.get("_extracted_price"):
+                                        print(f"      b2cItemDO 字段: {list(item_info.keys())[:8]}")
+                                except Exception as sku_api_err:
+                                    print(f"      API SKU 提取失败: {sku_api_err}")
+
                                 # 1. 提取卖家的芝麻信用信息
                                 zhima_credit_text = await safe_get(
                                     seller_do, "zhimaLevelInfo", "levelName"
@@ -1050,6 +1322,32 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                         item_data["商品主图链接"] = all_image_urls[0]
 
                                 # --- END: 新增代码块 ---
+
+                                # 把从 API 提取的主价格合并到商品信息中
+                                extracted_price = item_data.pop("_extracted_price", None)
+                                if extracted_price and extracted_price != "0":
+                                    # 确保当前售价也有值
+                                    if not item_data.get("当前售价"):
+                                        item_data["当前售价"] = extracted_price
+                                    # 把主价格添加到 SKU 列表中
+                                    sku_basic = None
+                                    if item_data.get("SKU列表") and len(item_data["SKU列表"]) > 0:
+                                        # 已经有 SKU 信息，给每个添加价格
+                                        for sku in item_data["SKU列表"]:
+                                            if not sku.get("sku_price"):
+                                                sku["sku_price"] = extracted_price
+                                    else:
+                                        # 没有 SKU，创建默认的一个
+                                        item_data["SKU列表"] = [{
+                                            "sku_name": "默认",
+                                            "sku_price": extracted_price,
+                                            "sku_type": "api_main_price"
+                                        }]
+                                elif extracted_price:
+                                    # 即使价格是 0 也设置（虽然是免费的）
+                                    if not item_data.get("当前售价"):
+                                        item_data["当前售价"] = extracted_price
+
                                 item_data["“想要”人数"] = await safe_get(
                                     item_do,
                                     "wantCnt",
@@ -1083,6 +1381,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                     "本商品价格位置", {}
                                 )
 
+                                # 提交分析任务
                                 analysis_dispatcher.submit(
                                     ItemAnalysisJob(
                                         keyword=keyword,
@@ -1136,6 +1435,13 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                             # --- 修改: 增加关闭页面后的短暂整理时间 ---
                             await random_sleep(2, 4)  # 原来是 (1, 2.5)
 
+                        await _record_task_progress(
+                            page_num,
+                            progress_total_items_found,
+                            progress_items_processed,
+                            estimated_remaining_items,
+                        )
+
                     # --- 新增: 在处理完一页所有商品后，翻页前，增加一个更长的“休息”时间 ---
                     if not stop_scraping and page_num < max_pages:
                         print(
@@ -1154,6 +1460,17 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 log_time("收到取消信号，正在终止当前爬虫任务...")
                 raise
             except Exception as e:
+                # Continuous 模式下，让 TargetClosedError 继续传播以便执行下一批
+                if type(e).__name__ == "TargetClosedError" and execution_mode == "continuous":
+                    log_time("[Continuous] 浏览器会话结束，准备启动新一轮...")
+                    # 写入这一轮的最终记录
+                    await _record_task_progress(
+                        page_num,
+                        progress_total_items_found,
+                        progress_items_processed,
+                        estimated_remaining_items,
+                    )
+                    return processed_item_count
                 if type(e).__name__ == "TargetClosedError":
                     log_time("浏览器已关闭，忽略后续异常（可能是任务被停止）。")
                     return processed_item_count
@@ -1162,12 +1479,39 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                         f"Login required: redirected to passport flow ({e})"
                     ) from e
                 print(f"\n爬取过程中发生未知错误: {e}")
+
+                # 如果有任务ID，记录错误信息到数据库
+                if task_id is not None:
+                    try:
+                        repository = SqliteTaskRepository()
+                        task_service = TaskService(repository)
+                        error_msg = f"爬取过程中发生未知错误: {str(e)}"
+                        await task_service.record_task_error(task_id, error_msg)
+                        print(f"记录任务错误到数据库: {error_msg}")
+                    except Exception as db_err:
+                        print(f"记录错误到数据库失败: {db_err}")
+
                 raise
             finally:
                 if analysis_dispatcher is not None:
                     log_time("等待后台分析任务完成...")
                     await analysis_dispatcher.join()
                 log_time("任务执行完毕，浏览器将在5秒后自动关闭...")
+
+                # 任务结束时写入最终进度（确保current_page被更新）
+                if task_progress_service and task_id and page_num > 0:
+                    try:
+                        await task_progress_service.update_task_progress(
+                            task_id,
+                            page_num,
+                            progress_total_items_found,
+                            progress_items_processed,
+                            estimated_remaining_items,
+                        )
+                        log_time(f"[最终进度记录] page={page_num}, items={progress_items_processed}")
+                    except Exception as e:
+                        print(f"记录最终进度失败: {e}")
+
                 await asyncio.sleep(5)
                 if debug_limit:
                     input("按回车键关闭浏览器...")
@@ -1183,6 +1527,11 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
     )
     last_error = ""
     last_state_path: Optional[str] = None
+
+    # 初始化进度跟踪变量（用于 continuous 模式的批次间循环）
+    progress_total_items_found = 0
+    progress_items_processed = 0
+    estimated_remaining_items = 0
 
     # If this task is already in a paused state, skip immediately.
     task_name_for_guard = task_config.get("task_name", "未命名任务")
@@ -1265,15 +1614,240 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             processed_item_count += await _run_scrape_attempt(state_path, proxy_server)
             last_error = ""
             FAILURE_GUARD.record_success(task_name_for_guard)
+
+            # ===== Continuous 模式：批次间循环 =====
+            if execution_mode == "continuous" and not last_error:
+                # 初始化 task_run 管理
+                task_run_repo = SqliteTaskRunRepository()
+                batch_number = 1  # 第一批为 batch_number=1
+
+                # 为第一批创建 task_run 记录
+                try:
+                    first_batch_run = await task_run_repo.create_run(
+                        task_id=task_id,
+                        execution_mode="continuous",
+                        batch_number=batch_number
+                    )
+                    first_batch_run_id = first_batch_run.id
+                    log_time(f"[Task Run] 创建第一批 task_run 记录: id={first_batch_run_id}, batch_number={batch_number}")
+                except Exception as run_err:
+                    log_time(f"[Task Run] 创建第一批 task_run 记录失败: {run_err}")
+                    first_batch_run_id = None
+
+                # 计算第一批处理的总页数
+                # resume_from_page 是起始页，max_pages 是本批处理的页数
+                # 所以已处理页数 = resume_from_page - 1 + max_pages
+                total_pages_processed = resume_from_page - 1 + max_pages
+                log_time(f"[Continuous] 第一批完成，估计已处理 {total_pages_processed} 页")
+
+                # 如果数据库有更准确的数据，使用数据库值
+                if task_progress_service:
+                    try:
+                        current_progress = await task_progress_service.get_task_progress(task_id)
+                        if current_progress and current_progress.current_page:
+                            db_current_page = current_progress.current_page
+                            # 只有当数据库值大于估算值时才使用数据库值（说明有更新的进度）
+                            if db_current_page > total_pages_processed:
+                                total_pages_processed = db_current_page
+                                log_time(f"[Continuous] 从数据库读取更新的进度: page={total_pages_processed}")
+                    except Exception as e:
+                        log_time(f"[Continuous] 读取数据库进度失败: {e}，继续使用估算值")
+
+                # 完成第一批的 task_run 记录
+                if first_batch_run_id and task_progress_service and task_id:
+                    try:
+                        current_progress = await task_progress_service.get_task_progress(task_id)
+                        if current_progress:
+                            await task_run_repo.finish_run(
+                                run_id=first_batch_run_id,
+                                status="completed",
+                                pages_crawled=max_pages,
+                                items_found=current_progress.total_items_found or 0,
+                                items_processed=current_progress.items_processed or 0,
+                                error_message=None,
+                            )
+                            log_time(f"[Task Run] 完成第一批 task_run 记录: id={first_batch_run_id}, pages={max_pages}")
+                    except Exception as run_err:
+                        log_time(f"[Task Run] 完成第一批 task_run 记录失败: {run_err}")
+
+                # 计算剩余页数
+                remaining_pages = max_page_limit - total_pages_processed if max_page_limit > 0 else float('inf')
+
+                # 继续执行直到达到 max_page_limit
+                while remaining_pages > 0 and not last_error:
+                    # 检查是否还有机会执行
+                    if max_page_limit > 0 and total_pages_processed >= max_page_limit:
+                        log_time(f"[Continuous] 已达到最大页数限制 {max_page_limit}，停止执行")
+                        break
+
+                    # 计算这一批要执行的页数
+                    pages_this_batch = min(max_pages, int(remaining_pages)) if max_page_limit > 0 else max_pages
+
+                    log_time(f"[Continuous] 批次间休眠 {sleep_interval_min}-{sleep_interval_max}s...")
+
+                    # 批次开始前写入记录（只有已处理过页面才写入，避免写入 page=0 覆盖进度）
+                    if task_progress_service and task_id and total_pages_processed > 0:
+                        await task_progress_service.update_task_progress(
+                            task_id,
+                            total_pages_processed,
+                            progress_total_items_found,
+                            progress_items_processed,
+                            estimated_remaining_items or 0,
+                        )
+                        log_time(f"[进度记录] 批次开始前: page={total_pages_processed}")
+
+                    await random_sleep(sleep_interval_min, sleep_interval_max)
+
+                    # 设置每批的页数为 max_pages（临时修改）
+                    original_max_pages = max_pages
+                    max_pages = pages_this_batch
+
+                    # 更新 resume_from_page 为下一批的起始页
+                    resume_from_page = total_pages_processed + 1
+
+                    log_time(f"[Continuous] 开始执行第 {total_pages_processed + 1}-{total_pages_processed + pages_this_batch} 页...")
+                    log_time(f"[Continuous] 📍 resume_from_page 已设置为 {resume_from_page}（下一批的起始页）")
+
+                    # 创建本批次的 task_run 记录
+                    try:
+                        current_task_run = await task_run_repo.create_run(
+                            task_id=task_id,
+                            execution_mode="continuous",
+                            batch_number=batch_number
+                        )
+                        current_task_run_id = current_task_run.id
+                        log_time(f"[Task Run] 创建 task_run 记录: id={current_task_run_id}, batch_number={batch_number}")
+                    except Exception as run_err:
+                        log_time(f"[Task Run] 创建 task_run 记录失败: {run_err}")
+                        current_task_run_id = None
+
+                    try:
+                        batch_count = await _run_scrape_attempt(state_path, proxy_server)
+                        processed_item_count += batch_count
+                        total_pages_processed += pages_this_batch
+
+                        remaining_pages = max_page_limit - total_pages_processed if max_page_limit > 0 else float('inf')
+
+                        # 批次结束后从数据库读取最新的进度（确保获得准确的数据）
+                        if task_progress_service and task_id:
+                            try:
+                                current_progress = await task_progress_service.get_task_progress(task_id)
+                                if current_progress:
+                                    progress_total_items_found = current_progress.total_items_found or 0
+                                    progress_items_processed = current_progress.items_processed or 0
+
+                                    # 重新计算预估剩余商品数（基于全局进度而不是旧值）
+                                    # 防止 estimated_remaining_items 在批次结束时变 0 后就一直是 0
+                                    if max_page_limit > 0 and progress_total_items_found > 0 and total_pages_processed > 0:
+                                        # 基于已抓取的页数计算平均每页商品数
+                                        avg_items_per_page = progress_total_items_found // total_pages_processed
+                                        remaining_pages = max_page_limit - total_pages_processed
+                                        estimated_remaining_items = max(0, remaining_pages * avg_items_per_page)
+                                        log_time(f"[进度估算] 重算 estimated_remaining_items={estimated_remaining_items} (剩余页:{remaining_pages}, 平均每页:{avg_items_per_page})")
+                                    else:
+                                        estimated_remaining_items = current_progress.estimated_remaining_items or 0
+
+                                    log_time(f"[进度记录] 批次结束后: page={total_pages_processed}, items={progress_items_processed}, 剩余={estimated_remaining_items}")
+
+                                    # 完成本批次的 task_run 记录
+                                    if current_task_run_id:
+                                        try:
+                                            # 如果有错误，标记为失败；否则标记为完成
+                                            if last_error:
+                                                await task_run_repo.finish_run(
+                                                    run_id=current_task_run_id,
+                                                    status="failed",
+                                                    pages_crawled=pages_this_batch,
+                                                    items_found=progress_total_items_found,
+                                                    items_processed=progress_items_processed,
+                                                    error_message=last_error,
+                                                )
+                                                log_time(f"[Task Run] 标记 task_run 记录为失败: id={current_task_run_id}, error={last_error}")
+                                            else:
+                                                await task_run_repo.finish_run(
+                                                    run_id=current_task_run_id,
+                                                    status="completed",
+                                                    pages_crawled=pages_this_batch,
+                                                    items_found=progress_total_items_found,
+                                                    items_processed=progress_items_processed,
+                                                    error_message=None,
+                                                )
+                                                log_time(f"[Task Run] 完成 task_run 记录: id={current_task_run_id}, pages={pages_this_batch}, items={progress_items_processed}")
+                                            batch_number += 1  # 准备下一批
+                                        except Exception as run_complete_err:
+                                            log_time(f"[Task Run] 完成 task_run 记录失败: {run_complete_err}")
+                            except Exception as prog_err:
+                                log_time(f"[进度读取] 读取进度失败: {prog_err}")
+                    except Exception as cont_err:
+                        log_time(f"[Continuous] 批次执行出错: {cont_err}")
+                        last_error = str(cont_err)
+
+                        # 批次执行失败，标记 task_run 记录为失败
+                        if current_task_run_id:
+                            try:
+                                await task_run_repo.finish_run(
+                                    run_id=current_task_run_id,
+                                    status="failed",
+                                    pages_crawled=0,
+                                    items_found=0,
+                                    items_processed=0,
+                                    error_message=last_error,
+                                )
+                                log_time(f"[Task Run] 标记 task_run 记录为失败: id={current_task_run_id}")
+                            except Exception as run_err:
+                                log_time(f"[Task Run] 标记 task_run 失败状态失败: {run_err}")
+                    finally:
+                        # 恢复原始的 max_pages
+                        max_pages = original_max_pages
+
+                if remaining_pages <= 0 or last_error:
+                    log_time(f"[Continuous] 执行完成，已处理 {total_pages_processed} 页")
+
+                    # 如果有错误，保存到数据库
+                    if last_error and task_id is not None:
+                        try:
+                            repository = SqliteTaskRepository()
+                            task_service = TaskService(repository)
+                            await task_service.record_task_error(task_id, last_error)
+                            log_time(f"[错误记录] 已保存错误信息到数据库: {last_error}")
+                        except Exception as db_err:
+                            print(f"记录错误到数据库失败: {db_err}")
+
+                    break
+
             break
         except LoginRequiredError as e:
             last_error = str(e)
             print(f"检测到登录失效/重定向: {e}")
+
+            # 如果有任务ID，记录错误信息到数据库
+            if task_id is not None:
+                try:
+                    repository = SqliteTaskRepository()
+                    task_service = TaskService(repository)
+                    error_msg = f"检测到登录失效/重定向: {str(e)}"
+                    await task_service.record_task_error(task_id, error_msg)
+                    print(f"记录任务错误到数据库: {error_msg}")
+                except Exception as db_err:
+                    print(f"记录错误到数据库失败: {db_err}")
+
             break
         except RiskControlError as e:
             last_error = str(e)
             print(f"检测到风控或验证触发: {e}")
             # 风控验证通常不是简单轮换能解决的，避免无意义重试。
+
+            # 如果有任务ID，记录错误信息到数据库
+            if task_id is not None:
+                try:
+                    repository = SqliteTaskRepository()
+                    task_service = TaskService(repository)
+                    error_msg = f"检测到风控或验证触发: {str(e)}"
+                    await task_service.record_task_error(task_id, error_msg)
+                    print(f"记录任务错误到数据库: {error_msg}")
+                except Exception as db_err:
+                    print(f"记录错误到数据库失败: {db_err}")
+
             break
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}"

@@ -1,0 +1,9 @@
+<!-- placeholder-image.svg -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 150" fill="none">
+  <rect width="200" height="150" fill="#e5e7eb"/>
+  <g stroke="#9ca3af" stroke-width="2">
+    <circle cx="100" cy="75" r="40" stroke-dasharray="5 5"/>
+    <line x1="50" y1="100" x2="150" y2="100" stroke-dasharray="5 5"/>
+  </g>
+  <text x="100" y="120" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="#6b7280">暂无图片</text>
+</svg>

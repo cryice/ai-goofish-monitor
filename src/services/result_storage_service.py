@@ -164,7 +164,7 @@ def _save_result_record_sync(record: dict, keyword: str) -> bool:
         keyword_hit_count = 0
 
     with sqlite_connection() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """
             INSERT OR IGNORE INTO result_items (
                 result_filename, keyword, task_name, crawl_time, publish_time, price,
@@ -191,6 +191,34 @@ def _save_result_record_sync(record: dict, keyword: str) -> bool:
                 json.dumps(record, ensure_ascii=False),
             ),
         )
+        
+        result_item_id = cursor.lastrowid
+        if cursor.rowcount == 0:
+            existing_row = conn.execute(
+                """
+                SELECT id
+                FROM result_items
+                WHERE result_filename = ? AND link_unique_key = ?
+                LIMIT 1
+                """,
+                (build_result_filename(keyword), link_unique_key),
+            ).fetchone()
+            result_item_id = existing_row["id"] if existing_row else None
+
+        sku_list = item.get("SKU列表") or record.get("SKU列表") or []
+        if sku_list and result_item_id:
+            conn.execute("DELETE FROM item_skus WHERE result_item_id = ?", (result_item_id,))
+            for sku in sku_list:
+                if not isinstance(sku, dict):
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO item_skus (result_item_id, sku_name, sku_price)
+                    VALUES (?, ?, ?)
+                    """,
+                    (result_item_id, sku.get("sku_name", ""), sku.get("sku_price", ""))
+                )
+        
         conn.commit()
     return True
 

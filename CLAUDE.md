@@ -100,3 +100,4 @@ pytest tests/unit/test_utils.py::test_safe_get  # 运行单个测试函数
 - Docker 部署需通过 Web UI 手动更新登录状态（`state.json`）
 - 遇到滑动验证码时设置 `RUN_HEADLESS=false` 手动处理
 - 生产环境务必修改默认 Web 认证密码
+- **重要**：详见 [SKU_PRICE_ANALYSIS.md](./SKU_PRICE_ANALYSIS.md) - 关于规格价格获取的成本-收益分析建议

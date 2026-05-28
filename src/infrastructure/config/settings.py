@@ -95,6 +95,39 @@ class ScraperSettings(_EnvSettings):
     state_file: str = _env_field("xianyu_state.json", "STATE_FILE")
 
 
+class DatabaseSettings(_EnvSettings):
+    """数据库配置"""
+    # 数据库类型 (sqlite/postgres)
+    db_type: str = _env_field("sqlite", "DB_TYPE")
+    
+    # SQLite配置
+    sqlite_path: str = _env_field("data/app.sqlite3", "SQLITE_PATH")
+    
+    # PostgreSQL配置
+    postgres_host: str = _env_field("localhost", "POSTGRES_HOST")
+    postgres_port: int = _env_field(5432, "POSTGRES_PORT")
+    postgres_db: str = _env_field("goofish_monitor", "POSTGRES_DB")
+    postgres_user: str = _env_field("goofish_user", "POSTGRES_USER")
+    postgres_password: str = _env_field("", "POSTGRES_PASSWORD")
+    postgres_ssl_mode: str = _env_field("prefer", "POSTGRES_SSL_MODE")
+    
+    def get_database_url(self) -> str:
+        """获取数据库连接字符串"""
+        if self.db_type.lower() == "postgres":
+            ssl_param = f"?sslmode={self.postgres_ssl_mode}" if self.postgres_ssl_mode else ""
+            return f"postgresql://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}{ssl_param}"
+        else:  # sqlite
+            return f"sqlite:///{self.sqlite_path}"
+    
+    def is_postgresql(self) -> bool:
+        """检查是否使用PostgreSQL"""
+        return self.db_type.lower() == "postgres"
+    
+    def is_sqlite(self) -> bool:
+        """检查是否使用SQLite"""
+        return self.db_type.lower() == "sqlite"
+
+
 class AppSettings(_EnvSettings):
     """应用主配置"""
     server_port: int = _env_field(8000, "SERVER_PORT")
@@ -115,6 +148,7 @@ class AppSettings(_EnvSettings):
 
 # 全局配置实例（单例模式）
 _settings_instance = None
+_database_settings_instance = None
 
 def get_settings() -> AppSettings:
     """获取全局配置实例"""
@@ -124,15 +158,25 @@ def get_settings() -> AppSettings:
     return _settings_instance
 
 
+def get_database_settings() -> DatabaseSettings:
+    """获取数据库配置实例"""
+    global _database_settings_instance
+    if _database_settings_instance is None:
+        _database_settings_instance = DatabaseSettings()
+    return _database_settings_instance
+
+
 def reload_settings() -> None:
     """重新加载全局配置实例"""
-    global _settings_instance, settings, ai_settings, notification_settings, scraper_settings
+    global _settings_instance, _database_settings_instance, settings, ai_settings, notification_settings, scraper_settings, database_settings
     from dotenv import load_dotenv
     from src.infrastructure.config.env_manager import env_manager
 
     load_dotenv(dotenv_path=env_manager.env_file, override=True)
     _settings_instance = None
+    _database_settings_instance = None
     settings = get_settings()
+    database_settings = get_database_settings()
     ai_settings = AISettings()
     notification_settings = NotificationSettings()
     scraper_settings = ScraperSettings()
@@ -140,6 +184,7 @@ def reload_settings() -> None:
 
 # 导出便捷访问的配置实例
 settings = get_settings()
+database_settings = get_database_settings()
 ai_settings = AISettings()
 notification_settings = NotificationSettings()
 scraper_settings = ScraperSettings()

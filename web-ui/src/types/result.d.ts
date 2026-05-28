@@ -14,6 +14,7 @@ export interface ProductInfo {
   "商品图片列表"?: string[];
   "商品主图链接"?: string;
   "浏览量"?: string | number;
+  "SKU列表"?: SKUItem[];
 }
 
 export interface SellerInfo {
@@ -65,6 +66,13 @@ export interface PriceInsight {
   last_seen_at?: string | null;
 }
 
+export interface SKUItem {
+  sku_name: string;
+  sku_price?: string;
+  sku_type?: string;
+  selector_used?: string;
+}
+
 export interface ResultInsights {
   market_summary: {
     sample_count: number;
@@ -101,6 +109,7 @@ export interface ResultItem {
   "卖家信息": SellerInfo;
   ai_analysis: AiAnalysis;
   price_insight?: PriceInsight;
+  SKU列表?: SKUItem[];
   _status?: 'active' | 'hidden' | 'expired';
   _effective_hidden?: boolean;
   _hidden_reason?: 'manual' | 'rule' | 'expired' | null;

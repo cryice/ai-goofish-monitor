@@ -15,6 +15,88 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+resolve_server_port() {
+    local port=""
+
+    if [ -n "${SERVER_PORT:-}" ]; then
+        port="${SERVER_PORT}"
+    elif [ -f ".env" ]; then
+        port="$(awk -F= '
+            /^[[:space:]]*(export[[:space:]]+)?SERVER_PORT[[:space:]]*=/ {
+                value=$2
+                sub(/^[[:space:]]+/, "", value)
+                sub(/[[:space:]]+$/, "", value)
+                gsub(/"/, "", value)
+                gsub(/'\''/, "", value)
+                sub(/[[:space:]]*#.*/, "", value)
+                print value
+                exit
+            }
+        ' .env)"
+    fi
+
+    if [[ "$port" =~ ^[0-9]+$ ]]; then
+        echo "$port"
+    else
+        echo "8000"
+    fi
+}
+
+stop_existing_processes() {
+    local port="$1"
+    local target_pids=""
+    local pid=""
+    local pid_list=""
+
+    append_pid() {
+        local candidate="$1"
+        if [ -z "$candidate" ]; then
+            return
+        fi
+        if [ "$candidate" = "$$" ]; then
+            return
+        fi
+        case " $target_pids " in
+            *" $candidate "*) ;;
+            *) target_pids="$target_pids $candidate" ;;
+        esac
+    }
+
+    if command -v lsof >/dev/null 2>&1; then
+        pid_list="$(lsof -ti tcp:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+        for pid in $pid_list; do
+            append_pid "$pid"
+        done
+    fi
+
+    if command -v pgrep >/dev/null 2>&1; then
+        for pattern in "python3 -m src.app" "python -m src.app" "uvicorn src.app:app"; do
+            pid_list="$(pgrep -f "$pattern" 2>/dev/null || true)"
+            for pid in $pid_list; do
+                append_pid "$pid"
+            done
+        done
+    fi
+
+    if [ -n "${target_pids// }" ]; then
+        echo -e "${YELLOW}检测到已有运行进程，正在结束: ${target_pids}${NC}"
+        kill $target_pids 2>/dev/null || true
+        sleep 2
+
+        for pid in $target_pids; do
+            if kill -0 "$pid" >/dev/null 2>&1; then
+                echo -e "${YELLOW}进程 $pid 未退出，执行强制结束...${NC}"
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        done
+        echo -e "${GREEN}✓ 已清理旧进程${NC}"
+    else
+        echo -e "${GREEN}✓ 未发现冲突进程${NC}"
+    fi
+}
+
+SERVER_PORT_RESOLVED="$(resolve_server_port)"
+
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}闲鱼监控系统 - 本地启动脚本${NC}"
 echo -e "${GREEN}========================================${NC}"
@@ -222,7 +304,7 @@ print_solution_windows() {
     cat <<'EOF'
 Windows (PowerShell) 解决办法:
 1) 安装 Python 与 Node:
-   winget install Python.Python.3.11
+   winget install Python.Python.3.14
    winget install OpenJS.NodeJS.LTS
 2) 安装 Playwright:
    py -m pip install playwright
@@ -339,10 +421,12 @@ echo -e "${GREEN}✓ 已确认构建产物位于项目根目录 dist/${NC}"
 
 # 5. 启动后端服务
 echo -e "\n${YELLOW}[6/6] 启动后端服务...${NC}"
+stop_existing_processes "$SERVER_PORT_RESOLVED"
+
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}服务启动中...${NC}"
-echo -e "${GREEN}访问地址: http://localhost:8000${NC}"
-echo -e "${GREEN}API 文档: http://localhost:8000/docs${NC}"
+echo -e "${GREEN}访问地址: http://localhost:${SERVER_PORT_RESOLVED}${NC}"
+echo -e "${GREEN}API 文档: http://localhost:${SERVER_PORT_RESOLVED}/docs${NC}"
 echo -e "${GREEN}========================================${NC}\n"
 
 python3 -m src.app

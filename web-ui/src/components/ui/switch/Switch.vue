@@ -11,16 +11,22 @@ import { cn } from "@/lib/utils"
 
 const props = defineProps<SwitchRootProps & { class?: HTMLAttributes["class"] }>()
 
-const emits = defineEmits<SwitchRootEmits>()
+const emit = defineEmits<SwitchRootEmits>()
 
 const delegatedProps = reactiveOmit(props, "class")
 
-const forwarded = useForwardPropsEmits(delegatedProps, emits)
+const forwarded = useForwardPropsEmits(delegatedProps, emit)
+
+// reka-ui 的 Switch 使用 update:checked 事件，我们需要将其转换为 update:modelValue 以支持 v-model
+const handleChecked = (checked: boolean) => {
+  emit('update:modelValue', checked)
+}
 </script>
 
 <template>
   <SwitchRoot
     v-bind="forwarded"
+    @update:checked="handleChecked"
     :class="cn(
       'peer inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input',
       props.class,
